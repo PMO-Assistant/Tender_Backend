@@ -30,7 +30,10 @@ const corsOptions = {
         const allowedOrigins = [
             CORS_ORIGIN,
             FRONTEND_URL,
-            'http://localhost:3000'
+            'https://adcoportal.ie',
+            'https://www.adcoportal.ie',
+            'http://localhost:3000',
+            'https://localhost:3000'
         ];
         
         // Check if origin is allowed
@@ -225,7 +228,14 @@ app.get('/cors-debug', (req, res) => {
         environment: NODE_ENV,
         corsOrigin: CORS_ORIGIN,
         frontendUrl: FRONTEND_URL,
-        allowedOrigins: [CORS_ORIGIN, FRONTEND_URL, 'http://localhost:3000']
+        allowedOrigins: [
+            CORS_ORIGIN, 
+            FRONTEND_URL, 
+            'https://adcoportal.ie',
+            'https://www.adcoportal.ie',
+            'http://localhost:3000',
+            'https://localhost:3000'
+        ]
     });
 });
 
