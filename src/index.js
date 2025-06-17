@@ -3,13 +3,61 @@ const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
 
+// Environment variables with fallbacks
+const CORS_ORIGIN = process.env.CORS_ORIGIN || 'https://adcoportal.ie';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://adcoportal.ie';
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+console.log('🚀 Starting ADCO Backend with configuration:', {
+    CORS_ORIGIN,
+    FRONTEND_URL,
+    NODE_ENV,
+    PORT: process.env.PORT || 3001
+});
+
+// CORS configuration
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Log all CORS requests for debugging
+        console.log('🌐 CORS Request from origin:', origin);
+        
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) {
+            console.log('✅ Allowing request with no origin');
+            return callback(null, true);
+        }
+        
+        const allowedOrigins = [
+            CORS_ORIGIN,
+            FRONTEND_URL,
+            'http://localhost:3000'
+        ];
+        
+        // Check if origin is allowed
+        const isAllowed = allowedOrigins.includes(origin);
+        
+        if (isAllowed) {
+            console.log('✅ CORS: Origin allowed:', origin);
+            callback(null, true);
+        } else {
+            console.log('❌ CORS: Origin blocked:', origin);
+            console.log('📋 Allowed origins:', allowedOrigins);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    optionsSuccessStatus: 200 // Some legacy browsers choke on 204
+};
+
 // Simple session config
 const sessionConfig = {
     secret: process.env.SESSION_SECRET || 'fallback-secret-key',
     resave: false,
     saveUninitialized: false,
     cookie: {
-        secure: process.env.NODE_ENV === 'production',
+        secure: NODE_ENV === 'production',
         httpOnly: true,
         maxAge: 24 * 60 * 60 * 1000,
         sameSite: 'lax'
@@ -24,7 +72,7 @@ try {
     const authModule = require('./routes/auth');
     authRouter = authModule.authRouter;
 } catch (error) {
-    console.log('Auth router not available, creating fallback');
+    console.log('⚠️ Auth router not available, creating fallback');
     authRouter = express.Router();
     authRouter.get('/health', (req, res) => res.json({ status: 'auth-healthy' }));
 }
@@ -33,6 +81,7 @@ try {
 try {
     eventRoutes = require('./routes/eventRoutes');
 } catch (error) {
+    console.log('⚠️ Event routes not available, creating fallback');
     eventRoutes = express.Router();
     eventRoutes.get('/', (req, res) => res.json({ message: 'Events endpoint' }));
 }
@@ -40,6 +89,7 @@ try {
 try {
     employeeRoutes = require('./routes/employeeRoutes');
 } catch (error) {
+    console.log('⚠️ Employee routes not available, creating fallback');
     employeeRoutes = express.Router();
     employeeRoutes.get('/', (req, res) => res.json({ message: 'Employees endpoint' }));
 }
@@ -47,6 +97,7 @@ try {
 try {
     assetRoutes = require('./routes/assetRoutes');
 } catch (error) {
+    console.log('⚠️ Asset routes not available, creating fallback');
     assetRoutes = express.Router();
     assetRoutes.get('/', (req, res) => res.json({ message: 'Assets endpoint' }));
 }
@@ -54,6 +105,7 @@ try {
 try {
     quickLinkRoutes = require('./routes/quickLinkRoutes');
 } catch (error) {
+    console.log('⚠️ QuickLink routes not available, creating fallback');
     quickLinkRoutes = express.Router();
     quickLinkRoutes.get('/', (req, res) => res.json({ message: 'Quicklinks endpoint' }));
 }
@@ -61,6 +113,7 @@ try {
 try {
     subcontractorRoutes = require('./routes/subcontractorRoutes');
 } catch (error) {
+    console.log('⚠️ Subcontractor routes not available, creating fallback');
     subcontractorRoutes = express.Router();
     subcontractorRoutes.get('/', (req, res) => res.json({ message: 'Subcontractors endpoint' }));
 }
@@ -68,6 +121,7 @@ try {
 try {
     calendarRoutes = require('./routes/calendarRoutes');
 } catch (error) {
+    console.log('⚠️ Calendar routes not available, creating fallback');
     calendarRoutes = express.Router();
     calendarRoutes.get('/', (req, res) => res.json({ message: 'Calendar endpoint' }));
 }
@@ -75,6 +129,7 @@ try {
 try {
     erpTutorialRoutes = require('./routes/erpTutorials');
 } catch (error) {
+    console.log('⚠️ ERP Tutorial routes not available, creating fallback');
     erpTutorialRoutes = express.Router();
     erpTutorialRoutes.get('/', (req, res) => res.json({ message: 'ERP Tutorials endpoint' }));
 }
@@ -82,6 +137,7 @@ try {
 try {
     safetyContentRoutes = require('./routes/safetyContent');
 } catch (error) {
+    console.log('⚠️ Safety Content routes not available, creating fallback');
     safetyContentRoutes = express.Router();
     safetyContentRoutes.get('/', (req, res) => res.json({ message: 'Safety Content endpoint' }));
 }
@@ -89,43 +145,45 @@ try {
 try {
     autodeskTutorialRoutes = require('./routes/autodeskTutorials');
 } catch (error) {
+    console.log('⚠️ Autodesk Tutorial routes not available, creating fallback');
     autodeskTutorialRoutes = express.Router();
     autodeskTutorialRoutes.get('/', (req, res) => res.json({ message: 'Autodesk Tutorials endpoint' }));
 }
 
 const app = express();
 
-// Simple CORS setup
-app.use(cors({
-    origin: [
-        process.env.CORS_ORIGIN || 'https://adcoportal.ie',
-        process.env.FRONTEND_URL || 'https://adcoportal.ie',
-        'http://localhost:3000'
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-}));
+// 1. CORS middleware MUST be applied FIRST, before any other middleware
+console.log('🔧 Applying CORS middleware...');
+app.use(cors(corsOptions));
 
-// Handle OPTIONS requests
-app.options('*', (req, res) => {
-    res.status(200).end();
-});
+// 2. Handle OPTIONS requests explicitly for all routes
+app.options('*', cors(corsOptions));
 
-// Basic middleware
+// 3. Basic middleware (after CORS)
 app.use(express.json());
 app.use(session(sessionConfig));
 
-// Simple request logging
+// 4. Request logging middleware (after CORS)
 app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    console.log(`📝 ${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin}`);
+    
+    // Special logging for OPTIONS requests
+    if (req.method === 'OPTIONS') {
+        console.log('🔄 Preflight request detected');
+        console.log('📋 Preflight headers:', {
+            'access-control-request-method': req.headers['access-control-request-method'],
+            'access-control-request-headers': req.headers['access-control-request-headers'],
+            origin: req.headers.origin
+        });
+    }
+    
     next();
 });
 
-// Public routes
+// 5. Public routes (no authentication required)
 app.use('/api/auth', authRouter);
 
-// Protected routes (without middleware for now)
+// 6. Protected routes (without authentication middleware for now to prevent crashes)
 app.use('/api/events', eventRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/assets', assetRoutes);
@@ -136,55 +194,81 @@ app.use('/api/erp-tutorials', erpTutorialRoutes);
 app.use('/api/safety-content', safetyContentRoutes);
 app.use('/api/autodesk-tutorials', autodeskTutorialRoutes);
 
-// Health check endpoint
+// 7. Health check endpoint
 app.get('/health', (req, res) => {
     res.status(200).json({ 
         status: 'ok',
         timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
+        environment: NODE_ENV,
+        corsOrigin: CORS_ORIGIN,
+        frontendUrl: FRONTEND_URL
     });
 });
 
-// Public test endpoint
+// 8. Public test endpoint
 app.get('/public-test', (req, res) => {
     res.status(200).json({ 
         message: 'Public endpoint working',
         timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
+        environment: NODE_ENV,
+        corsOrigin: CORS_ORIGIN,
+        frontendUrl: FRONTEND_URL
     });
 });
 
-// CORS debug endpoint
+// 9. CORS debug endpoint
 app.get('/cors-debug', (req, res) => {
     res.status(200).json({ 
         message: 'CORS debug endpoint',
         origin: req.headers.origin,
         timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development',
-        corsOrigin: process.env.CORS_ORIGIN,
-        frontendUrl: process.env.FRONTEND_URL
+        environment: NODE_ENV,
+        corsOrigin: CORS_ORIGIN,
+        frontendUrl: FRONTEND_URL,
+        allowedOrigins: [CORS_ORIGIN, FRONTEND_URL, 'http://localhost:3000']
     });
 });
 
-// Root endpoint
+// 10. Root endpoint
 app.get('/', (req, res) => {
     res.status(200).json({ 
         message: 'ADCO Backend API is running',
         version: '1.0.0',
         timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
+        environment: NODE_ENV,
+        corsOrigin: CORS_ORIGIN,
+        frontendUrl: FRONTEND_URL
     });
 });
 
-// Simple error handler
+// 11. Global error handler
 app.use((err, req, res, next) => {
-    console.error('Error:', err.message);
-    res.status(500).json({ error: 'Something went wrong!' });
+    console.error('❌ Error occurred:', err.message);
+    console.error('📋 Request details:', {
+        method: req.method,
+        path: req.path,
+        origin: req.headers.origin,
+        userAgent: req.headers['user-agent']
+    });
+    
+    // Don't send error details in production
+    const errorMessage = NODE_ENV === 'production' ? 'Something went wrong!' : err.message;
+    res.status(500).json({ error: errorMessage });
 });
 
-// Start server
+// 12. 404 handler
+app.use('*', (req, res) => {
+    console.log('❌ 404 - Route not found:', req.method, req.originalUrl);
+    res.status(404).json({ error: 'Route not found' });
+});
+
+// 13. Start server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log('✅ Server is running on port', PORT);
+    console.log('🌍 Environment:', NODE_ENV);
+    console.log('🔗 CORS Origin:', CORS_ORIGIN);
+    console.log('🎯 Frontend URL:', FRONTEND_URL);
+    console.log('📊 Health check available at: /health');
+    console.log('🔍 CORS debug available at: /cors-debug');
 });
