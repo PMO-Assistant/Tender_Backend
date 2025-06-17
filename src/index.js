@@ -81,14 +81,69 @@ app.use((req, res, next) => {
 
 // ✅ CORS setup
 app.use(cors({
-    origin: [
-        process.env.FRONTEND_URL || 'http://localhost:3000',
-        // Allow all Vercel frontend URLs
-        /^https:\/\/.*\.vercel\.app$/,
-        /^https:\/\/.*\.vercel\.com$/,
-        // Allow specific domains if configured
-        ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [])
-    ],
+    origin: function (origin, callback) {
+        // Log all CORS requests for debugging
+        console.log('CORS Request from origin:', origin);
+        
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) {
+            console.log('Allowing request with no origin');
+            return callback(null, true);
+        }
+        
+        // Get allowed origins from environment variables
+        const corsOrigin = process.env.CORS_ORIGIN;
+        const frontendUrl = process.env.FRONTEND_URL;
+        const allowedOrigins = process.env.ALLOWED_ORIGINS;
+        
+        // Build the list of allowed origins
+        const origins = [];
+        
+        // Add CORS_ORIGIN if set
+        if (corsOrigin) {
+            origins.push(corsOrigin);
+        }
+        
+        // Add FRONTEND_URL if set
+        if (frontendUrl) {
+            origins.push(frontendUrl);
+        }
+        
+        // Add ALLOWED_ORIGINS if set (comma-separated)
+        if (allowedOrigins) {
+            origins.push(...allowedOrigins.split(',').map(o => o.trim()));
+        }
+        
+        // Add default localhost for development
+        if (process.env.NODE_ENV !== 'production') {
+            origins.push('http://localhost:3000');
+        }
+        
+        // Add Vercel patterns for flexibility
+        origins.push(/^https:\/\/.*\.vercel\.app$/);
+        origins.push(/^https:\/\/.*\.vercel\.com$/);
+        
+        console.log('Configured allowed origins:', origins);
+        
+        // Check if origin is allowed
+        const isAllowed = origins.some(allowedOrigin => {
+            if (typeof allowedOrigin === 'string') {
+                return origin === allowedOrigin;
+            } else if (allowedOrigin instanceof RegExp) {
+                return allowedOrigin.test(origin);
+            }
+            return false;
+        });
+        
+        if (isAllowed) {
+            console.log('CORS: Origin allowed:', origin);
+            callback(null, true);
+        } else {
+            console.log('CORS: Origin blocked:', origin);
+            console.log('Allowed origins:', origins);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
@@ -130,6 +185,49 @@ app.get('/health', (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development'
+    });
+});
+
+// CORS debug endpoint
+app.get('/cors-debug', (req, res) => {
+    const corsOrigin = process.env.CORS_ORIGIN;
+    const frontendUrl = process.env.FRONTEND_URL;
+    const allowedOrigins = process.env.ALLOWED_ORIGINS;
+    
+    // Build the list of allowed origins (same logic as CORS middleware)
+    const origins = [];
+    
+    if (corsOrigin) {
+        origins.push(corsOrigin);
+    }
+    
+    if (frontendUrl) {
+        origins.push(frontendUrl);
+    }
+    
+    if (allowedOrigins) {
+        origins.push(...allowedOrigins.split(',').map(o => o.trim()));
+    }
+    
+    if (process.env.NODE_ENV !== 'production') {
+        origins.push('http://localhost:3000');
+    }
+    
+    origins.push(/^https:\/\/.*\.vercel\.app$/);
+    origins.push(/^https:\/\/.*\.vercel\.com$/);
+    
+    res.status(200).json({ 
+        message: 'CORS debug endpoint',
+        origin: req.headers.origin,
+        userAgent: req.headers['user-agent'],
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+        corsConfiguration: {
+            CORS_ORIGIN: corsOrigin,
+            FRONTEND_URL: frontendUrl,
+            ALLOWED_ORIGINS: allowedOrigins,
+            configuredOrigins: origins
+        }
     });
 });
 

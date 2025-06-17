@@ -16,7 +16,8 @@ The following environment variables are required for the backend to function pro
 
 ### Optional Variables
 
-- `FRONTEND_URL` - Frontend URL for CORS (default: http://localhost:3000)
+- `CORS_ORIGIN` - Frontend URL for CORS (e.g., https://adcoportal.ie)
+- `FRONTEND_URL` - Frontend URL for CORS (e.g., https://adcoportal.ie)
 - `ALLOWED_ORIGINS` - Comma-separated list of additional allowed origins for CORS
 - `CALENDAR_EMAIL` - Email address for calendar access (default: info@adco.ie)
 - `CALENDAR_TIMEZONE` - Timezone for calendar events (default: Europe/Dublin)
@@ -45,9 +46,11 @@ The following environment variables are required for the backend to function pro
 ## CORS Configuration
 
 The backend is configured to allow:
-- Localhost development (http://localhost:3000)
-- All Vercel frontend URLs (*.vercel.app, *.vercel.com)
+- URLs specified in `CORS_ORIGIN` environment variable
+- URLs specified in `FRONTEND_URL` environment variable
 - Additional origins specified in `ALLOWED_ORIGINS` environment variable
+- Localhost development (http://localhost:3000) in non-production environments
+- All Vercel frontend URLs (*.vercel.app, *.vercel.com)
 
 ## Authentication
 

@@ -30,8 +30,9 @@ Go to your Heroku dashboard → Settings → Config Vars and add:
 - `FRONTEND_URI` = (your frontend URL)
 
 #### CORS Variables:
-- `FRONTEND_URL` = (your Vercel frontend URL)
-- `ALLOWED_ORIGINS` = (comma-separated list of additional origins)
+- `CORS_ORIGIN` = (your frontend URL, e.g., https://adcoportal.ie)
+- `FRONTEND_URL` = (your frontend URL, e.g., https://adcoportal.ie)
+- `ALLOWED_ORIGINS` = (comma-separated list of additional origins, optional)
 
 #### Optional Variables:
 - `CALENDAR_EMAIL` = (default: info@adco.ie)
@@ -74,9 +75,11 @@ heroku logs --tail
 **Symptoms:** Frontend can't connect to backend
 
 **Solutions:**
-- Verify `FRONTEND_URL` is set correctly
-- Check `ALLOWED_ORIGINS` includes your frontend URL
+- Verify `CORS_ORIGIN` is set correctly (e.g., https://adcoportal.ie)
+- Check `FRONTEND_URL` is set correctly
+- Check `ALLOWED_ORIGINS` includes additional origins if needed
 - Ensure Vercel URLs are allowed (regex patterns are included)
+- Test the `/cors-debug` endpoint to see current configuration
 
 #### 4. Authentication Issues
 **Symptoms:** Azure AD login fails
@@ -131,7 +134,8 @@ Before deploying, ensure these are set in Heroku:
 - [ ] `AZURE_REDIRECT_URI`
 - [ ] `AZURE_POST_LOGOUT_REDIRECT_URI`
 - [ ] `FRONTEND_URI`
-- [ ] `FRONTEND_URL`
+- [ ] `CORS_ORIGIN` (your frontend URL)
+- [ ] `FRONTEND_URL` (your frontend URL)
 - [ ] `ALLOWED_ORIGINS` (optional)
 
 ## Post-Deployment Verification
