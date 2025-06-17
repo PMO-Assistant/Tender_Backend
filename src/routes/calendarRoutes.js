@@ -16,13 +16,15 @@ router.get('/events', validateAdcoToken, async (req, res) => {
     }
 
     // Use the shared calendar for info@adco.ie
-    const graphApiUrl = 'https://graph.microsoft.com/v1.0/users/info@adco.ie/calendar/events';
+    const calendarEmail = process.env.CALENDAR_EMAIL || 'info@adco.ie';
+    const timezone = process.env.CALENDAR_TIMEZONE || 'Europe/Dublin';
+    const graphApiUrl = `https://graph.microsoft.com/v1.0/users/${calendarEmail}/calendar/events`;
     console.log('Fetching calendar events from:', graphApiUrl);
 
     const graphResponse = await fetch(graphApiUrl, {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
-        'Prefer': 'outlook.timezone="Europe/Dublin"',
+        'Prefer': `outlook.timezone="${timezone}"`,
         'Accept': 'application/json',
         'Content-Type': 'application/json',
       },
