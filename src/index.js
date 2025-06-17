@@ -196,25 +196,32 @@ app.get('/cors-debug', (req, res) => {
     
     // Build the list of allowed origins (same logic as CORS middleware)
     const origins = [];
+    const originStrings = [];
     
     if (corsOrigin) {
         origins.push(corsOrigin);
+        originStrings.push(corsOrigin);
     }
     
     if (frontendUrl) {
         origins.push(frontendUrl);
+        originStrings.push(frontendUrl);
     }
     
     if (allowedOrigins) {
         origins.push(...allowedOrigins.split(',').map(o => o.trim()));
+        originStrings.push(...allowedOrigins.split(',').map(o => o.trim()));
     }
     
     if (process.env.NODE_ENV !== 'production') {
         origins.push('http://localhost:3000');
+        originStrings.push('http://localhost:3000');
     }
     
+    // Add Vercel patterns
     origins.push(/^https:\/\/.*\.vercel\.app$/);
     origins.push(/^https:\/\/.*\.vercel\.com$/);
+    originStrings.push('/^https:\\/\\/.*\\.vercel\\.app$/', '/^https:\\/\\/.*\\.vercel\\.com$/');
     
     res.status(200).json({ 
         message: 'CORS debug endpoint',
@@ -226,7 +233,7 @@ app.get('/cors-debug', (req, res) => {
             CORS_ORIGIN: corsOrigin,
             FRONTEND_URL: frontendUrl,
             ALLOWED_ORIGINS: allowedOrigins,
-            configuredOrigins: origins
+            configuredOrigins: originStrings
         }
     });
 });
