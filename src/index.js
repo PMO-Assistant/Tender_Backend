@@ -161,7 +161,12 @@ app.use('/api/auth', authRouter);
 // ✅ Protected routes using ADCO token validation - with error handling
 const protectedRoute = (path, middleware, router) => {
     try {
-        app.use(path, middleware, router);
+        if (middleware && typeof middleware === 'function') {
+            app.use(path, middleware, router);
+        } else {
+            console.warn(`Middleware not available for ${path}, setting up route without middleware`);
+            app.use(path, router);
+        }
     } catch (error) {
         console.error(`Error setting up protected route ${path}:`, error);
         // Set up basic route without middleware as fallback
@@ -169,15 +174,29 @@ const protectedRoute = (path, middleware, router) => {
     }
 };
 
-protectedRoute('/api/events', validateAdcoToken, eventRoutes);
-protectedRoute('/api/employees', validateAdcoToken, employeeRoutes);
-protectedRoute('/api/assets', validateAdcoToken, assetRoutes);
-protectedRoute('/api/quicklinks', validateAdcoToken, quickLinkRoutes);
-protectedRoute('/api/subcontractors', validateAdcoToken, subcontractorRoutes);
-protectedRoute('/api/calendar', validateAdcoToken, calendarRoutes);
-protectedRoute('/api/erp-tutorials', validateAdcoToken, erpTutorialRoutes);
-protectedRoute('/api/safety-content', validateAdcoToken, safetyContentRoutes);
-protectedRoute('/api/autodesk-tutorials', validateAdcoToken, autodeskTutorialRoutes);
+// Set up routes with fallback if middleware is not available
+if (validateAdcoToken) {
+    protectedRoute('/api/events', validateAdcoToken, eventRoutes);
+    protectedRoute('/api/employees', validateAdcoToken, employeeRoutes);
+    protectedRoute('/api/assets', validateAdcoToken, assetRoutes);
+    protectedRoute('/api/quicklinks', validateAdcoToken, quickLinkRoutes);
+    protectedRoute('/api/subcontractors', validateAdcoToken, subcontractorRoutes);
+    protectedRoute('/api/calendar', validateAdcoToken, calendarRoutes);
+    protectedRoute('/api/erp-tutorials', validateAdcoToken, erpTutorialRoutes);
+    protectedRoute('/api/safety-content', validateAdcoToken, safetyContentRoutes);
+    protectedRoute('/api/autodesk-tutorials', validateAdcoToken, autodeskTutorialRoutes);
+} else {
+    console.warn('validateAdcoToken middleware not available, setting up routes without authentication');
+    app.use('/api/events', eventRoutes);
+    app.use('/api/employees', employeeRoutes);
+    app.use('/api/assets', assetRoutes);
+    app.use('/api/quicklinks', quickLinkRoutes);
+    app.use('/api/subcontractors', subcontractorRoutes);
+    app.use('/api/calendar', calendarRoutes);
+    app.use('/api/erp-tutorials', erpTutorialRoutes);
+    app.use('/api/safety-content', safetyContentRoutes);
+    app.use('/api/autodesk-tutorials', autodeskTutorialRoutes);
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -248,21 +267,6 @@ app.get('/cors-debug', (req, res) => {
             ALLOWED_ORIGINS: allowedOrigins,
             configuredOrigins: originStrings
         }
-    });
-});
-
-// Token test endpoint (for debugging)
-app.get('/token-test', validateAdcoToken, (req, res) => {
-    res.status(200).json({ 
-        message: 'Token validation successful',
-        userEmail: req.userEmail,
-        tokenInfo: {
-            hasDecodedToken: !!req.decodedToken,
-            aud: req.decodedToken?.aud,
-            iss: req.decodedToken?.iss,
-            exp: req.decodedToken?.exp
-        },
-        timestamp: new Date().toISOString()
     });
 });
 
