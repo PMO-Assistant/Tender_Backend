@@ -1,23 +1,23 @@
 const express = require('express');
 const router = express.Router();
-const { sessionAuthMiddleware } = require('../middleware/auth');
-const fetch = require('node-fetch'); // Assuming node-fetch is available
+const validateAdcoToken = require('../middleware/validateAdcoToken');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
-
-// GET /api/calendar/events - Fetch events from the specified shared calendar
-router.get('/events', sessionAuthMiddleware, async (req, res) => {
+// GET /api/calendar/events - Fetch events from the info@adco.ie shared calendar
+router.get('/events', validateAdcoToken, async (req, res) => {
   try {
-    const accessToken = req.session.user?.accessToken;
+    // Extract token from Authorization header (set by validateAdcoToken middleware)
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader.split(' ')[1];
 
     if (!accessToken) {
-      return res.status(401).json({ error: 'No access token found in session.' });
+      console.error('No access token found in Authorization header');
+      return res.status(401).json({ error: 'No access token found.' });
     }
 
-    
-    const calendarId = process.env.GRAPH_CALENDAR_ID;
-    const graphApiUrl = `https://graph.microsoft.com/v1.0/me/calendars/${calendarId}/events`;
-    
-
+    // Use the shared calendar for info@adco.ie
+    const graphApiUrl = 'https://graph.microsoft.com/v1.0/users/info@adco.ie/calendar/events';
+    console.log('Fetching calendar events from:', graphApiUrl);
 
     const graphResponse = await fetch(graphApiUrl, {
       headers: {
@@ -30,16 +30,35 @@ router.get('/events', sessionAuthMiddleware, async (req, res) => {
 
     if (!graphResponse.ok) {
       const errorData = await graphResponse.json();
-      console.error('Microsoft Graph API Error:', errorData);
-      return res.status(graphResponse.status).json({ error: errorData.error?.message || 'Failed to fetch events from Graph API' });
+      console.error('Microsoft Graph API Error Details:', {
+        status: graphResponse.status,
+        statusText: graphResponse.statusText,
+        error: errorData,
+        headers: Object.fromEntries(graphResponse.headers.entries())
+      });
+      return res.status(graphResponse.status).json({ 
+        error: errorData.error?.message || 'Failed to fetch events from Graph API',
+        details: errorData
+      });
     }
 
     const graphData = await graphResponse.json();
+    console.log('Successfully fetched calendar events:', {
+      eventCount: graphData.value?.length || 0,
+      firstEvent: graphData.value?.[0]?.subject
+    });
     res.json(graphData);
 
   } catch (error) {
-    console.error('Error in backend calendar route:', error);
-    res.status(500).json({ error: 'Internal server error fetching calendar events.' });
+    console.error('Error in backend calendar route:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    res.status(500).json({ 
+      error: 'Internal server error fetching calendar events.',
+      details: error.message
+    });
   }
 });
 

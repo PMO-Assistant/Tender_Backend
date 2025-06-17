@@ -114,6 +114,124 @@ const subcontractorController = {
     }
   },
 
+  // Bulk create subcontractors
+  bulkCreate: async (req, res) => {
+    try {
+      const { pool, poolConnect } = require('../config/database');
+      await poolConnect;
+      
+      const subcontractors = req.body;
+      
+      if (!Array.isArray(subcontractors) || subcontractors.length === 0) {
+        return res.status(400).json({ message: 'Invalid data: expected non-empty array of subcontractors' });
+      }
+
+      // Start transaction
+      const transaction = new sql.Transaction(pool);
+      await transaction.begin();
+
+      try {
+        // Validate all subcontractors first
+        for (const sub of subcontractors) {
+          if (!sub.SubID || !sub.SubName) {
+            await transaction.rollback();
+            return res.status(400).json({ message: 'All subcontractors must have SubID and SubName' });
+          }
+        }
+
+        // Check for existing SubIDs
+        const subIDs = subcontractors.map(sub => sub.SubID);
+        
+        // Build dynamic query with proper parameter binding
+        const placeholders = subIDs.map((_, index) => `@subID${index}`).join(',');
+        const query = `SELECT SubID FROM PortalSubbies WHERE SubID IN (${placeholders})`;
+        
+        const request = pool.request();
+        subIDs.forEach((subID, index) => {
+          request.input(`subID${index}`, sql.VarChar, subID);
+        });
+        
+        const existingCheck = await request.query(query);
+
+        if (existingCheck.recordset.length > 0) {
+          await transaction.rollback();
+          const existingSubIDs = existingCheck.recordset.map(r => r.SubID);
+          return res.status(400).json({ 
+            message: `The following SubIDs already exist: ${existingSubIDs.join(', ')}` 
+          });
+        }
+
+        // Create all subcontractors
+        const created = await Subcontractor.bulkCreate(subcontractors, transaction);
+        
+        if (created) {
+          await transaction.commit();
+          res.status(201).json({ 
+            message: `${subcontractors.length} subcontractor(s) created successfully`,
+            count: subcontractors.length
+          });
+        } else {
+          await transaction.rollback();
+          res.status(400).json({ message: 'Failed to create subcontractors' });
+        }
+      } catch (err) {
+        await transaction.rollback();
+        throw err;
+      }
+    } catch (err) {
+      console.error('Error in bulkCreate:', err);
+      res.status(500).json({ message: err.message });
+    }
+  },
+
+  // Bulk create reviews
+  bulkCreateReviews: async (req, res) => {
+    try {
+      const { pool, poolConnect } = require('../config/database');
+      await poolConnect;
+      
+      const reviews = req.body;
+      
+      if (!Array.isArray(reviews) || reviews.length === 0) {
+        return res.status(400).json({ message: 'Invalid data: expected non-empty array of reviews' });
+      }
+
+      // Start transaction
+      const transaction = new sql.Transaction(pool);
+      await transaction.begin();
+
+      try {
+        // Validate all reviews first
+        for (const review of reviews) {
+          if (!review.SubID || !review.ProjectNo) {
+            await transaction.rollback();
+            return res.status(400).json({ message: 'All reviews must have SubID and ProjectNo' });
+          }
+        }
+
+        // Create all reviews
+        const created = await Subcontractor.bulkCreateReviews(reviews, transaction);
+        
+        if (created) {
+          await transaction.commit();
+          res.status(201).json({ 
+            message: `${reviews.length} review(s) created successfully`,
+            count: reviews.length
+          });
+        } else {
+          await transaction.rollback();
+          res.status(400).json({ message: 'Failed to create reviews' });
+        }
+      } catch (err) {
+        await transaction.rollback();
+        throw err;
+      }
+    } catch (err) {
+      console.error('Error in bulkCreateReviews:', err);
+      res.status(500).json({ message: err.message });
+    }
+  },
+
   // --- Reviews ---
   getAllReviews: async (req, res) => {
     try {
@@ -799,6 +917,36 @@ try {
       res.json({ exists });
     } catch (err) {
       console.error('Error checking SubID:', err);
+      res.status(500).json({ message: err.message });
+    }
+  },
+
+  // Check multiple SubIDs
+  checkMultipleSubIDs: async (req, res) => {
+    try {
+      const { subIDs } = req.body;
+      const { pool, poolConnect } = require('../config/database');
+      await poolConnect;
+      
+      if (!Array.isArray(subIDs)) {
+        return res.status(400).json({ message: 'subIDs must be an array' });
+      }
+      
+      // Build dynamic query with proper parameter binding
+      const placeholders = subIDs.map((_, index) => `@subID${index}`).join(',');
+      const query = `SELECT SubID FROM PortalSubbies WHERE SubID IN (${placeholders})`;
+      
+      const request = pool.request();
+      subIDs.forEach((subID, index) => {
+        request.input(`subID${index}`, sql.VarChar, subID);
+      });
+      
+      const result = await request.query(query);
+      
+      const existingSubIDs = result.recordset.map(r => r.SubID);
+      res.json({ existingSubIDs });
+    } catch (err) {
+      console.error('Error checking multiple SubIDs:', err);
       res.status(500).json({ message: err.message });
     }
   },

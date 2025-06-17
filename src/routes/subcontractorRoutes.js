@@ -19,6 +19,10 @@ router.post('/', subcontractorController.create);
 router.put('/:id', subcontractorController.update);
 router.delete('/:id', subcontractorController.delete);
 
+// Bulk upload endpoints
+router.post('/bulk', subcontractorController.bulkCreate);
+router.post('/ratings/bulk', subcontractorController.bulkCreateReviews);
+
 // CSV Upload
 router.post('/upload-csv', uploadLimiter, upload.single('file'), subcontractorController.uploadCSV);
 
@@ -44,5 +48,8 @@ router.delete('/comments/:commentid', subcontractorController.deleteComment);
 
 // Add new route for checking SubID
 router.get('/check/:subID', subcontractorController.checkSubID);
+
+// Add route for checking multiple SubIDs
+router.post('/check-multiple', subcontractorController.checkMultipleSubIDs);
 
 module.exports = router; 

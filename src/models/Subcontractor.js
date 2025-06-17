@@ -311,19 +311,21 @@ class Subcontractor {
     for (const review of reviews) {
       const request = new sql.Request(transaction);
   
-      request.input('Date', sql.Date, review.Date);
+      // Ensure Date is properly formatted or use current date
+      const reviewDate = review.Date ? new Date(review.Date) : new Date();
+      request.input('Date', sql.Date, reviewDate);
       request.input('SubID', sql.VarChar, review.SubID);
       request.input('ProjectNo', sql.Int, parseInt(review.ProjectNo));
-      request.input('ProjectName', sql.NVarChar, review.ProjectName);
-      request.input('Scope', sql.NVarChar, review.Scope);
-      request.input('Pros', sql.NVarChar, review.Pros);
-      request.input('Cons', sql.NVarChar, review.Cons);
-      request.input('Safety', review.Safety ? sql.Int : sql.NVarChar, review.Safety);
-      request.input('Quality', review.Quality ? sql.Int : sql.NVarChar, review.Quality);
-      request.input('Programme', review.Programme ? sql.Int : sql.NVarChar, review.Programme);
-      request.input('Management', review.Management ? sql.Int : sql.NVarChar, review.Management);
-      request.input('Commercial', review.Commercial ? sql.Int : sql.NVarChar, review.Commercial);
-      request.input('Environment', review.Environment ? sql.Int : sql.NVarChar, review.Environment);
+      request.input('ProjectName', sql.NVarChar, review.ProjectName || '');
+      request.input('Scope', sql.NVarChar, review.Scope || '');
+      request.input('Pros', sql.NVarChar, review.Pros || '');
+      request.input('Cons', sql.NVarChar, review.Cons || '');
+      request.input('Safety', review.Safety ? sql.Int : sql.NVarChar, review.Safety || null);
+      request.input('Quality', review.Quality ? sql.Int : sql.NVarChar, review.Quality || null);
+      request.input('Programme', review.Programme ? sql.Int : sql.NVarChar, review.Programme || null);
+      request.input('Management', review.Management ? sql.Int : sql.NVarChar, review.Management || null);
+      request.input('Commercial', review.Commercial ? sql.Int : sql.NVarChar, review.Commercial || null);
+      request.input('Environment', review.Environment ? sql.Int : sql.NVarChar, review.Environment || null);
   
       await request.query(`
         INSERT INTO PortalSubbiesReview (

@@ -31,12 +31,11 @@ class Asset {
                 .input('name', asset.name)
                 .input('type', asset.type)
                 .input('location', asset.location)
-                .input('purchase_date', asset.purchaseDate)
                 .input('status', asset.status)
                 .input('quantity', asset.quantity)
                 .query(`
-                    INSERT INTO Assets (id, name, type, location, purchase_date, status, quantity)
-                    VALUES (@id, @name, @type, @location, @purchase_date, @status, @quantity)
+                    INSERT INTO Assets (id, name, type, location, status, quantity)
+                    VALUES (@id, @name, @type, @location, @status, @quantity)
                 `);
             return result.rowsAffected[0] > 0;
         } catch (err) {
@@ -52,7 +51,6 @@ class Asset {
                 .input('name', asset.name)
                 .input('type', asset.type)
                 .input('location', asset.location)
-                .input('purchase_date', asset.purchaseDate)
                 .input('status', asset.status)
                 .input('quantity', asset.quantity)
                 .query(`
@@ -60,7 +58,6 @@ class Asset {
                     SET name = @name,
                         type = @type,
                         location = @location,
-                        purchase_date = @purchase_date,
                         status = @status,
                         quantity = @quantity,
                         updated_at = GETDATE()
