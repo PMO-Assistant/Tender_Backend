@@ -188,6 +188,19 @@ app.get('/health', (req, res) => {
     });
 });
 
+// Public test endpoint (no auth required)
+app.get('/public-test', (req, res) => {
+    res.status(200).json({ 
+        message: 'Public endpoint working',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+        headers: {
+            origin: req.headers.origin,
+            userAgent: req.headers['user-agent']
+        }
+    });
+});
+
 // CORS debug endpoint
 app.get('/cors-debug', (req, res) => {
     const corsOrigin = process.env.CORS_ORIGIN;
@@ -235,6 +248,21 @@ app.get('/cors-debug', (req, res) => {
             ALLOWED_ORIGINS: allowedOrigins,
             configuredOrigins: originStrings
         }
+    });
+});
+
+// Token test endpoint (for debugging)
+app.get('/token-test', validateAdcoToken, (req, res) => {
+    res.status(200).json({ 
+        message: 'Token validation successful',
+        userEmail: req.userEmail,
+        tokenInfo: {
+            hasDecodedToken: !!req.decodedToken,
+            aud: req.decodedToken?.aud,
+            iss: req.decodedToken?.iss,
+            exp: req.decodedToken?.exp
+        },
+        timestamp: new Date().toISOString()
     });
 });
 
