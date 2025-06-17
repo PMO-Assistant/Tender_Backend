@@ -76,6 +76,11 @@ process.on('unhandledRejection', (reason, promise) => {
 // Debug logging
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin}`);
+    console.log(`Request headers:`, {
+        'user-agent': req.headers['user-agent'],
+        'content-type': req.headers['content-type'],
+        'authorization': req.headers['authorization'] ? 'Present' : 'Missing'
+    });
     next();
 });
 
@@ -149,6 +154,16 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
 }));
 
+// Handle OPTIONS requests explicitly
+app.options('*', (req, res) => {
+    console.log('OPTIONS request received for:', req.path);
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.status(200).end();
+});
+
 // ✅ JSON parsing
 app.use(express.json());
 
@@ -162,6 +177,7 @@ app.use('/api/auth', authRouter);
 const protectedRoute = (path, middleware, router) => {
     try {
         if (middleware && typeof middleware === 'function') {
+            console.log(`Setting up protected route: ${path} with middleware`);
             app.use(path, middleware, router);
         } else {
             console.warn(`Middleware not available for ${path}, setting up route without middleware`);
@@ -170,32 +186,52 @@ const protectedRoute = (path, middleware, router) => {
     } catch (error) {
         console.error(`Error setting up protected route ${path}:`, error);
         // Set up basic route without middleware as fallback
-        app.use(path, router);
+        try {
+            app.use(path, router);
+            console.log(`Fallback route set up for: ${path}`);
+        } catch (fallbackError) {
+            console.error(`Failed to set up fallback route for ${path}:`, fallbackError);
+        }
     }
 };
 
 // Set up routes with fallback if middleware is not available
-if (validateAdcoToken) {
-    protectedRoute('/api/events', validateAdcoToken, eventRoutes);
-    protectedRoute('/api/employees', validateAdcoToken, employeeRoutes);
-    protectedRoute('/api/assets', validateAdcoToken, assetRoutes);
-    protectedRoute('/api/quicklinks', validateAdcoToken, quickLinkRoutes);
-    protectedRoute('/api/subcontractors', validateAdcoToken, subcontractorRoutes);
-    protectedRoute('/api/calendar', validateAdcoToken, calendarRoutes);
-    protectedRoute('/api/erp-tutorials', validateAdcoToken, erpTutorialRoutes);
-    protectedRoute('/api/safety-content', validateAdcoToken, safetyContentRoutes);
-    protectedRoute('/api/autodesk-tutorials', validateAdcoToken, autodeskTutorialRoutes);
-} else {
-    console.warn('validateAdcoToken middleware not available, setting up routes without authentication');
-    app.use('/api/events', eventRoutes);
-    app.use('/api/employees', employeeRoutes);
-    app.use('/api/assets', assetRoutes);
-    app.use('/api/quicklinks', quickLinkRoutes);
-    app.use('/api/subcontractors', subcontractorRoutes);
-    app.use('/api/calendar', calendarRoutes);
-    app.use('/api/erp-tutorials', erpTutorialRoutes);
-    app.use('/api/safety-content', safetyContentRoutes);
-    app.use('/api/autodesk-tutorials', autodeskTutorialRoutes);
+try {
+    if (validateAdcoToken) {
+        console.log('Setting up routes with authentication middleware');
+        protectedRoute('/api/events', validateAdcoToken, eventRoutes);
+        protectedRoute('/api/employees', validateAdcoToken, employeeRoutes);
+        protectedRoute('/api/assets', validateAdcoToken, assetRoutes);
+        protectedRoute('/api/quicklinks', validateAdcoToken, quickLinkRoutes);
+        protectedRoute('/api/subcontractors', validateAdcoToken, subcontractorRoutes);
+        protectedRoute('/api/calendar', validateAdcoToken, calendarRoutes);
+        protectedRoute('/api/erp-tutorials', validateAdcoToken, erpTutorialRoutes);
+        protectedRoute('/api/safety-content', validateAdcoToken, safetyContentRoutes);
+        protectedRoute('/api/autodesk-tutorials', validateAdcoToken, autodeskTutorialRoutes);
+    } else {
+        console.warn('validateAdcoToken middleware not available, setting up routes without authentication');
+        app.use('/api/events', eventRoutes);
+        app.use('/api/employees', employeeRoutes);
+        app.use('/api/assets', assetRoutes);
+        app.use('/api/quicklinks', quickLinkRoutes);
+        app.use('/api/subcontractors', subcontractorRoutes);
+        app.use('/api/calendar', calendarRoutes);
+        app.use('/api/erp-tutorials', erpTutorialRoutes);
+        app.use('/api/safety-content', safetyContentRoutes);
+        app.use('/api/autodesk-tutorials', autodeskTutorialRoutes);
+    }
+} catch (error) {
+    console.error('Error setting up routes:', error);
+    // Set up basic fallback routes
+    app.use('/api/events', (req, res) => res.json({ message: 'Events endpoint' }));
+    app.use('/api/employees', (req, res) => res.json({ message: 'Employees endpoint' }));
+    app.use('/api/assets', (req, res) => res.json({ message: 'Assets endpoint' }));
+    app.use('/api/quicklinks', (req, res) => res.json({ message: 'Quicklinks endpoint' }));
+    app.use('/api/subcontractors', (req, res) => res.json({ message: 'Subcontractors endpoint' }));
+    app.use('/api/calendar', (req, res) => res.json({ message: 'Calendar endpoint' }));
+    app.use('/api/erp-tutorials', (req, res) => res.json({ message: 'ERP Tutorials endpoint' }));
+    app.use('/api/safety-content', (req, res) => res.json({ message: 'Safety Content endpoint' }));
+    app.use('/api/autodesk-tutorials', (req, res) => res.json({ message: 'Autodesk Tutorials endpoint' }));
 }
 
 // Health check endpoint
