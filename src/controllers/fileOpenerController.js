@@ -12,14 +12,8 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
-// Encode a token safely for URL (Base64URL format)
-function base64urlEncode(str) {
-  return Buffer.from(str)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-}
+// Encode safely for URL components
+const safeEncode = (str) => encodeURIComponent(str);
 
 const fileOpenerController = {
   // ✅ Health check
@@ -34,7 +28,7 @@ const fileOpenerController = {
   // ✅ Generate a temporary open link for the Electron app
   generateOpenLink: async (req, res) => {
     try {
-      const user = req.user || {}; // optional fallback if no auth middleware
+      const user = req.user || {};
       const { driveId, fileId, fileName, token } = req.body;
 
       if (!driveId || !fileId || !fileName || (!user.token && !token)) {
@@ -49,10 +43,15 @@ const fileOpenerController = {
         expiresAt: Date.now() + TOKEN_EXPIRY_MS
       });
 
-      const safeFileName = encodeURIComponent(fileName);
-      const openLink = `myapp://${driveId}:${fileId}:${safeFileName}:${tokenId}`;
+      // Safely encode all parts for URI
+      const safeDriveId = safeEncode(driveId);
+      const safeFileId = safeEncode(fileId);
+      const safeFileName = safeEncode(fileName);
+      const safeTokenId = safeEncode(tokenId);
 
-      return res.status(200).json({ openLink });
+      const openLink = `myapp://${safeDriveId}:${safeFileId}:${safeFileName}:${safeTokenId}`;
+
+      return res.status(200).json({ openLink, code: safeTokenId });
     } catch (err) {
       console.error('Error generating open link:', err);
       return res.status(500).json({ message: 'Internal server error' });
