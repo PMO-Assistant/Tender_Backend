@@ -1,5 +1,6 @@
 const sql = require('mssql');
 const { SocksProxyAgent } = require('socks-proxy-agent');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 require('dotenv').config();
 
 // Log environment status
@@ -40,12 +41,28 @@ if (missingEnvVars.length > 0) {
 // Configure proxy if QUOTAGUARDSTATIC_URL is available
 if (process.env.QUOTAGUARDSTATIC_URL) {
     try {
-        console.log('🔄 Configuring QuotaGuard SOCKS proxy...');
-        const agent = new SocksProxyAgent(process.env.QUOTAGUARDSTATIC_URL);
+        const proxyUrl = process.env.QUOTAGUARDSTATIC_URL;
+        console.log('🔄 Configuring QuotaGuard proxy...');
+        
+        let agent;
+        if (proxyUrl.startsWith('socks')) {
+            console.log('📡 Using SOCKS proxy protocol');
+            agent = new SocksProxyAgent(proxyUrl);
+        } else {
+            console.log('📡 Using HTTPS proxy protocol');
+            // Convert http:// to https:// for secure connections
+            const httpsProxyUrl = proxyUrl.replace(/^http:/, 'https:');
+            agent = new HttpsProxyAgent(httpsProxyUrl);
+        }
+
         dbConfig.connection = { agent };
         console.log('✅ QuotaGuard proxy configured successfully');
+        
     } catch (error) {
         console.error('❌ Error configuring QuotaGuard proxy:', error.message);
+        console.error('⚠️ Proxy URL format should be either:');
+        console.error('   - socks5://username:password@proxy.quotaguard.com:1080');
+        console.error('   - http://username:password@proxy.quotaguard.com:1080');
         process.exit(1);
     }
 } else {
