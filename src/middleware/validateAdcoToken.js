@@ -61,7 +61,33 @@ const validateAdcoToken = (req, res, next) => {
     req.userEmail = email;
     
     console.log('validateAdcoToken: Token validation successful for:', email);
+
+    // ✅ OPTIONAL: Auto-launch desktop app using custom protocol (if needed)
+    if (req.query.openApp === 'true') {
+      const openUrl = req.query.link ? decodeURIComponent(req.query.link) : null;
     
+      if (!openUrl) {
+        console.warn('⚠️ openApp requested but no link provided.');
+        return res.status(400).send('Missing protocol link.');
+      }
+    
+      console.log('🚀 Attempting to launch app with:', openUrl);
+      return res.send(`
+        <html>
+          <body>
+            <script>
+              window.location.href = "${openUrl}";
+              setTimeout(() => {
+                window.close();
+              }, 1000);
+            </script>
+            <p>Launching desktop app...</p>
+          </body>
+        </html>
+      `);
+    }
+    
+
     // Allow the request to proceed
     next();
   } catch (error) {
@@ -70,4 +96,4 @@ const validateAdcoToken = (req, res, next) => {
   }
 };
 
-module.exports = validateAdcoToken; 
+module.exports = validateAdcoToken;
