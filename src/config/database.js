@@ -1,17 +1,15 @@
 const sql = require('mssql');
-const createTunnel = require('tunnel-ssh'); // 👈 Aqui é o fix!
-const url = require('url');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 require('dotenv').config();
 
-const proxyUrl = process.env.QUOTAGUARDSTATIC_URL;
-const parsed = url.parse(proxyUrl);
-const [qgUser, qgPass] = parsed.auth.split(':');
+const proxyUrl = process.env.QUOTAGUARDSTATIC_URL; // ex: socks5://user:pass@proxy.quotaguard.com:1080
+const dbServer = process.env.DB_SERVER; // ex: adcocontracting.database.windows.net
 
 const dbConfig = {
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
-    server: '127.0.0.1',
-    port: 14330,
+    server: dbServer,
+    port: 1433,
     database: process.env.DB_NAME,
     options: {
         encrypt: true,
@@ -24,42 +22,25 @@ const dbConfig = {
     }
 };
 
-const tunnelConfig = {
-    username: qgUser,
-    password: qgPass,
-    host: parsed.hostname,
-    port: 1080,
-    dstHost: process.env.DB_SERVER,
-    dstPort: 1433,
-    localHost: '127.0.0.1',
-    localPort: 14330,
-    keepAlive: true,
-    autoClose: false
-};
+// Criar agente SOCKS para o SQL Server
+const agent = new SocksProxyAgent(proxyUrl);
 
-let pool;
-let poolConnect = new Promise((resolve, reject) => {
-    createTunnel(tunnelConfig, (tunnelError, server) => {
-        if (tunnelError) {
-            console.error('❌ SSH tunnel error:', tunnelError);
-            return reject(tunnelError);
-        }
+// Sobrescreve o dialeto padrão para usar o agente
+dbConfig.connection = { agent };
 
-        pool = new sql.ConnectionPool(dbConfig);
-        pool.connect()
-            .then(() => {
-                console.log('✅ Connected to Azure SQL via Quotaguard');
-                resolve(pool);
-            })
-            .catch(sqlError => {
-                console.error('❌ SQL connection error:', sqlError);
-                reject(sqlError);
-            });
+const pool = new sql.ConnectionPool(dbConfig);
+const poolConnect = pool.connect()
+    .then(() => {
+        console.log('✅ Connected to Azure SQL via QuotaGuard SOCKS proxy');
+        return pool;
+    })
+    .catch(err => {
+        console.error('❌ SQL connection error:', err);
+        throw err;
     });
-});
 
 module.exports = {
+    sql,
     pool,
-    poolConnect,
-    sql
+    poolConnect
 };
