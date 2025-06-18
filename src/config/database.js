@@ -1,5 +1,6 @@
 const sql = require('mssql');
-const tunnel = require('tunnel-ssh');
+const tunnel = require('tunnel-ssh').default || require('tunnel-ssh');
+
 const url = require('url');
 require('dotenv').config();
 
