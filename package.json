@@ -25,6 +25,7 @@
     "mssql": "^11.0.1",
     "multer": "^2.0.0",
     "node-fetch": "^3.3.2",
+    "socks-proxy-agent": "^8.0.5",
     "tunnel-ssh": "^4.1.4",
     "url": "^0.11.4"
   },
