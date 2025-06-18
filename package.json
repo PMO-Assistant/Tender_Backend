@@ -24,7 +24,8 @@
     "memorystore": "^1.6.7",
     "mssql": "^11.0.1",
     "multer": "^2.0.0",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "tunnel-ssh": "^5.2.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
