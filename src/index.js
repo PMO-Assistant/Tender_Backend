@@ -69,7 +69,7 @@ const sessionConfig = {
 
 // Load routes with simple error handling
 let authRouter, eventRoutes, employeeRoutes, assetRoutes, quickLinkRoutes, 
-    subcontractorRoutes, calendarRoutes, erpTutorialRoutes, safetyContentRoutes, autodeskTutorialRoutes;
+    subcontractorRoutes, calendarRoutes, erpTutorialRoutes, safetyContentRoutes, autodeskTutorialRoutes, fileOpenerRoutes;
 
 try {
     const authModule = require('./routes/auth');
@@ -153,6 +153,18 @@ try {
     autodeskTutorialRoutes.get('/', (req, res) => res.json({ message: 'Autodesk Tutorials endpoint' }));
 }
 
+try {
+    fileOpenerRoutes = require('./routes/fileOpenerRoutes');
+    console.log('✅ File Opener routes loaded - using in-memory token store');
+} catch (error) {
+    console.log('⚠️ File Opener routes not available, creating fallback');
+    fileOpenerRoutes = express.Router();
+    fileOpenerRoutes.get('/', (req, res) => res.json({ 
+        message: 'File Opener endpoint',
+        note: 'Using in-memory token store with 3-minute expiry'
+    }));
+}
+
 const app = express();
 
 // 1. CORS middleware MUST be applied FIRST, before any other middleware
@@ -196,6 +208,9 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/erp-tutorials', erpTutorialRoutes);
 app.use('/api/safety-content', safetyContentRoutes);
 app.use('/api/autodesk-tutorials', autodeskTutorialRoutes);
+
+// File opener routes with in-memory token store (3-minute expiry)
+app.use('/api/file-opener', fileOpenerRoutes);
 
 // 7. Health check endpoint
 app.get('/health', (req, res) => {
