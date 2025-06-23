@@ -33,7 +33,7 @@ const assetController = {
     // Create new asset
     createAsset: async (req, res) => {
         try {
-            const { id, name, type, location, purchase_date, status } = req.body;
+            const { id, name, type, location, purchase_date, status, owner, comments } = req.body;
             
             await poolConnect;
             const result = await pool.request()
@@ -43,9 +43,11 @@ const assetController = {
                 .input('location', location)
                 .input('purchase_date', purchase_date)
                 .input('status', status)
+                .input('owner', owner)
+                .input('comments', comments)
                 .query(`
-                    INSERT INTO portalAssets (id, name, type, location, purchase_date, status)
-                    VALUES (@id, @name, @type, @location, @purchase_date, @status)
+                    INSERT INTO portalAssets (id, name, type, location, purchase_date, status, owner, comments)
+                    VALUES (@id, @name, @type, @location, @purchase_date, @status, @owner, @comments)
                 `);
             
             res.status(201).json({ 
@@ -54,7 +56,9 @@ const assetController = {
                 type,
                 location,
                 purchase_date,
-                status
+                status,
+                owner,
+                comments
             });
         } catch (err) {
             console.error('Error creating asset:', err);
@@ -65,7 +69,7 @@ const assetController = {
     // Update asset
     updateAsset: async (req, res) => {
         try {
-            const { name, type, location, purchase_date, status } = req.body;
+            const { name, type, location, purchase_date, status, owner, comments } = req.body;
             
             await poolConnect;
             const result = await pool.request()
@@ -75,6 +79,8 @@ const assetController = {
                 .input('location', location)
                 .input('purchase_date', purchase_date)
                 .input('status', status)
+                .input('owner', owner)
+                .input('comments', comments)
                 .query(`
                     UPDATE portalAssets 
                     SET name = @name,
@@ -82,6 +88,8 @@ const assetController = {
                         location = @location,
                         purchase_date = @purchase_date,
                         status = @status,
+                        owner = @owner,
+                        comments = @comments,
                         updated_at = GETDATE()
                     WHERE id = @id
                 `);

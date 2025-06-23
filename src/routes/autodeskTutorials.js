@@ -1,77 +1,69 @@
 const express = require('express')
 const router = express.Router()
 const AutodeskTutorial = require('../models/AutodeskTutorial')
+const validateAdcoToken = require('../middleware/validateAdcoToken')
 
-// Get all autodesk tutorials
-router.get('/', async (req, res) => {
+// Get all tutorials
+router.get('/', validateAdcoToken, async (req, res) => {
   try {
     const tutorials = await AutodeskTutorial.findAll()
     res.json(tutorials)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error('Error fetching tutorials:', error)
+    res.status(500).json({ error: 'Failed to fetch tutorials' })
   }
 })
 
-// Get autodesk tutorial by ID
-router.get('/:id', async (req, res) => {
+// Get a single tutorial by ID
+router.get('/:id', validateAdcoToken, async (req, res) => {
   try {
     const tutorial = await AutodeskTutorial.findById(req.params.id)
     if (!tutorial) {
-      return res.status(404).json({ error: 'Autodesk tutorial not found' })
+      return res.status(404).json({ error: 'Tutorial not found' })
     }
     res.json(tutorial)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error('Error fetching tutorial:', error)
+    res.status(500).json({ error: 'Failed to fetch tutorial' })
   }
 })
 
-// Create new autodesk tutorial
-router.post('/', async (req, res) => {
+// Create a new tutorial
+router.post('/', validateAdcoToken, async (req, res) => {
   try {
-    const { id, title, subtitle, location, content } = req.body
-    
-    // Validate required fields
-    if (!id || !title || !subtitle || !location || !content) {
-      return res.status(400).json({ error: 'All fields are required' })
-    }
-
-    const tutorial = await AutodeskTutorial.create({ id, title, subtitle, location, content })
+    const tutorial = await AutodeskTutorial.create(req.body)
     res.status(201).json(tutorial)
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    console.error('Error creating tutorial:', error)
+    res.status(500).json({ error: 'Failed to create tutorial' })
   }
 })
 
-// Update autodesk tutorial
-router.put('/:id', async (req, res) => {
+// Update a tutorial
+router.put('/:id', validateAdcoToken, async (req, res) => {
   try {
-    const { title, subtitle, location, content } = req.body
-    
-    // Validate required fields
-    if (!title || !subtitle || !location || !content) {
-      return res.status(400).json({ error: 'All fields are required' })
-    }
-
-    const tutorial = await AutodeskTutorial.update(req.params.id, { title, subtitle, location, content })
+    const tutorial = await AutodeskTutorial.update(req.params.id, req.body)
     res.json(tutorial)
   } catch (error) {
-    if (error.message === 'Autodesk tutorial not found') {
-      return res.status(404).json({ error: error.message })
+    console.error('Error updating tutorial:', error)
+    if (error.message === 'Tutorial not found') {
+      return res.status(404).json({ error: 'Tutorial not found' })
     }
-    res.status(500).json({ error: error.message })
+    res.status(500).json({ error: 'Failed to update tutorial' })
   }
 })
 
-// Delete autodesk tutorial
-router.delete('/:id', async (req, res) => {
+// Delete a tutorial
+router.delete('/:id', validateAdcoToken, async (req, res) => {
   try {
     await AutodeskTutorial.delete(req.params.id)
-    res.json({ message: 'Autodesk tutorial deleted successfully' })
+    res.status(204).send()
   } catch (error) {
-    if (error.message === 'Autodesk tutorial not found') {
-      return res.status(404).json({ error: error.message })
+    console.error('Error deleting tutorial:', error)
+    if (error.message === 'Tutorial not found') {
+      return res.status(404).json({ error: 'Tutorial not found' })
     }
-    res.status(500).json({ error: error.message })
+    res.status(500).json({ error: 'Failed to delete tutorial' })
   }
 })
 
