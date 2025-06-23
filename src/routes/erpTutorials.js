@@ -1,9 +1,10 @@
 const express = require('express')
 const router = express.Router()
 const ERPTutorial = require('../models/ERPTutorial')
+const validateAdcoToken = require('../middleware/validateAdcoToken')
 
 // Get all ERP tutorials
-router.get('/', async (req, res) => {
+router.get('/', validateAdcoToken, async (req, res) => {
   try {
     const tutorials = await ERPTutorial.findAll()
     res.json(tutorials)
@@ -13,7 +14,7 @@ router.get('/', async (req, res) => {
 })
 
 // Get ERP tutorial by ID
-router.get('/:id', async (req, res) => {
+router.get('/:id', validateAdcoToken, async (req, res) => {
   try {
     const tutorial = await ERPTutorial.findById(req.params.id)
     if (!tutorial) {
@@ -26,7 +27,7 @@ router.get('/:id', async (req, res) => {
 })
 
 // Create new ERP tutorial
-router.post('/', async (req, res) => {
+router.post('/', validateAdcoToken, async (req, res) => {
   try {
     const { id, title, subtitle, location, content } = req.body
     
@@ -43,7 +44,7 @@ router.post('/', async (req, res) => {
 })
 
 // Update ERP tutorial
-router.put('/:id', async (req, res) => {
+router.put('/:id', validateAdcoToken, async (req, res) => {
   try {
     const { title, subtitle, location, content } = req.body
     
@@ -63,7 +64,7 @@ router.put('/:id', async (req, res) => {
 })
 
 // Delete ERP tutorial
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', validateAdcoToken, async (req, res) => {
   try {
     await ERPTutorial.delete(req.params.id)
     res.json({ message: 'ERP tutorial deleted successfully' })

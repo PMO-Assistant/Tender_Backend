@@ -1,9 +1,10 @@
 const express = require('express')
 const router = express.Router()
 const SafetyContent = require('../models/SafetyContent')
+const validateAdcoToken = require('../middleware/validateAdcoToken')
 
 // Get all safety content
-router.get('/', async (req, res) => {
+router.get('/', validateAdcoToken, async (req, res) => {
   try {
     const content = await SafetyContent.findAll()
     res.json(content)
@@ -13,7 +14,7 @@ router.get('/', async (req, res) => {
 })
 
 // Get safety content by ID
-router.get('/:id', async (req, res) => {
+router.get('/:id', validateAdcoToken, async (req, res) => {
   try {
     const content = await SafetyContent.findById(req.params.id)
     if (!content) {
@@ -26,7 +27,7 @@ router.get('/:id', async (req, res) => {
 })
 
 // Create new safety content
-router.post('/', async (req, res) => {
+router.post('/', validateAdcoToken, async (req, res) => {
   try {
     const { id, title, subtitle, location, content } = req.body
     
@@ -43,7 +44,7 @@ router.post('/', async (req, res) => {
 })
 
 // Update safety content
-router.put('/:id', async (req, res) => {
+router.put('/:id', validateAdcoToken, async (req, res) => {
   try {
     const { title, subtitle, location, content } = req.body
     
@@ -63,7 +64,7 @@ router.put('/:id', async (req, res) => {
 })
 
 // Delete safety content
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', validateAdcoToken, async (req, res) => {
   try {
     await SafetyContent.delete(req.params.id)
     res.json({ message: 'Safety content deleted successfully' })

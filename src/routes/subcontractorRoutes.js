@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const subcontractorController = require('../controllers/subcontractorController');
+const validateAdcoToken = require('../middleware/validateAdcoToken');
 const multer = require('multer');
 const upload = multer({ dest: 'uploads/' });
 const rateLimit = require('express-rate-limit');
@@ -13,43 +14,43 @@ const uploadLimiter = rateLimit({
 });
 
 // --- Subcontractors ---
-router.get('/', subcontractorController.getAll);
-router.get('/:id', subcontractorController.getById);
-router.post('/', subcontractorController.create);
-router.put('/:id', subcontractorController.update);
-router.delete('/:id', subcontractorController.delete);
+router.get('/', validateAdcoToken, subcontractorController.getAll);
+router.get('/:id', validateAdcoToken, subcontractorController.getById);
+router.post('/', validateAdcoToken, subcontractorController.create);
+router.put('/:id', validateAdcoToken, subcontractorController.update);
+router.delete('/:id', validateAdcoToken, subcontractorController.delete);
 
 // Bulk upload endpoints
-router.post('/bulk', subcontractorController.bulkCreate);
-router.post('/ratings/bulk', subcontractorController.bulkCreateReviews);
+router.post('/bulk', validateAdcoToken, subcontractorController.bulkCreate);
+router.post('/ratings/bulk', validateAdcoToken, subcontractorController.bulkCreateReviews);
 
 // CSV Upload
-router.post('/upload-csv', uploadLimiter, upload.single('file'), subcontractorController.uploadCSV);
+router.post('/upload-csv', validateAdcoToken, uploadLimiter, upload.single('file'), subcontractorController.uploadCSV);
 
 // CSV Upload for Ratings
-router.post('/upload-ratings-csv', uploadLimiter, upload.single('file'), subcontractorController.uploadRatingsCSV);
+router.post('/upload-ratings-csv', validateAdcoToken, uploadLimiter, upload.single('file'), subcontractorController.uploadRatingsCSV);
 
 // CSV Upload for Reviews
-router.post('/upload-reviews-csv', uploadLimiter, upload.single('file'), subcontractorController.uploadReviewsCSV);
+router.post('/upload-reviews-csv', validateAdcoToken, uploadLimiter, upload.single('file'), subcontractorController.uploadReviewsCSV);
 
 // --- Reviews ---
-router.get('/:subid/reviews', subcontractorController.getAllReviews);
-router.get('/reviews/:reviewid', subcontractorController.getReviewById);
-router.post('/:subid/reviews', subcontractorController.createReview);
-router.put('/reviews/:reviewid', subcontractorController.updateReview);
-router.delete('/reviews/:reviewid', subcontractorController.deleteReview);
+router.get('/:subid/reviews', validateAdcoToken, subcontractorController.getAllReviews);
+router.get('/reviews/:reviewid', validateAdcoToken, subcontractorController.getReviewById);
+router.post('/:subid/reviews', validateAdcoToken, subcontractorController.createReview);
+router.put('/reviews/:reviewid', validateAdcoToken, subcontractorController.updateReview);
+router.delete('/reviews/:reviewid', validateAdcoToken, subcontractorController.deleteReview);
 
 // --- Comments ---
-router.get('/:subid/comments', subcontractorController.getAllComments);
-router.get('/comments/:commentid', subcontractorController.getCommentById);
-router.post('/:subid/comments', subcontractorController.createComment);
-router.put('/comments/:commentid', subcontractorController.updateComment);
-router.delete('/comments/:commentid', subcontractorController.deleteComment);
+router.get('/:subid/comments', validateAdcoToken, subcontractorController.getAllComments);
+router.get('/comments/:commentid', validateAdcoToken, subcontractorController.getCommentById);
+router.post('/:subid/comments', validateAdcoToken, subcontractorController.createComment);
+router.put('/comments/:commentid', validateAdcoToken, subcontractorController.updateComment);
+router.delete('/comments/:commentid', validateAdcoToken, subcontractorController.deleteComment);
 
 // Add new route for checking SubID
-router.get('/check/:subID', subcontractorController.checkSubID);
+router.get('/check/:subID', validateAdcoToken, subcontractorController.checkSubID);
 
 // Add route for checking multiple SubIDs
-router.post('/check-multiple', subcontractorController.checkMultipleSubIDs);
+router.post('/check-multiple', validateAdcoToken, subcontractorController.checkMultipleSubIDs);
 
 module.exports = router; 

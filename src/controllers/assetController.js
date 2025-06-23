@@ -46,7 +46,7 @@ const assetController = {
                 .input('owner', owner)
                 .input('comments', comments)
                 .query(`
-                    INSERT INTO portalAssets (id, name, type, location, purchase_date, status, owner, comments)
+                    INSERT INTO portalAssets (id, name, type, location, purchase_date, status, Owner, Comments)
                     VALUES (@id, @name, @type, @location, @purchase_date, @status, @owner, @comments)
                 `);
             
@@ -88,8 +88,8 @@ const assetController = {
                         location = @location,
                         purchase_date = @purchase_date,
                         status = @status,
-                        owner = @owner,
-                        comments = @comments,
+                        Owner = @owner,
+                        Comments = @comments,
                         updated_at = GETDATE()
                     WHERE id = @id
                 `);

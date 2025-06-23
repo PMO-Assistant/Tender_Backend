@@ -1,20 +1,21 @@
 const express = require('express');
 const router = express.Router();
 const quickLinkController = require('../controllers/quickLinkController');
+const validateAdcoToken = require('../middleware/validateAdcoToken');
 
 // Get all quick links
-router.get('/', quickLinkController.getAllQuickLinks);
+router.get('/', validateAdcoToken, quickLinkController.getAllQuickLinks);
 
 // Get quick link by ID
-router.get('/:id', quickLinkController.getQuickLinkById);
+router.get('/:id', validateAdcoToken, quickLinkController.getQuickLinkById);
 
 // Create new quick link
-router.post('/', quickLinkController.createQuickLink);
+router.post('/', validateAdcoToken, quickLinkController.createQuickLink);
 
 // Update quick link
-router.put('/:id', quickLinkController.updateQuickLink);
+router.put('/:id', validateAdcoToken, quickLinkController.updateQuickLink);
 
 // Delete quick link
-router.delete('/:id', quickLinkController.deleteQuickLink);
+router.delete('/:id', validateAdcoToken, quickLinkController.deleteQuickLink);
 
 module.exports = router; 

@@ -1,20 +1,21 @@
 const express = require('express');
 const router = express.Router();
 const employeeController = require('../controllers/employeeController');
+const validateAdcoToken = require('../middleware/validateAdcoToken');
 
 // Get all employees
-router.get('/', employeeController.getAllEmployees);
+router.get('/', validateAdcoToken, employeeController.getAllEmployees);
 
 // Get employee by ID
-router.get('/:id', employeeController.getEmployeeById);
+router.get('/:id', validateAdcoToken, employeeController.getEmployeeById);
 
 // Create new employee
-router.post('/', employeeController.createEmployee);
+router.post('/', validateAdcoToken, employeeController.createEmployee);
 
 // Update employee
-router.put('/:id', employeeController.updateEmployee);
+router.put('/:id', validateAdcoToken, employeeController.updateEmployee);
 
 // Delete employee
-router.delete('/:id', employeeController.deleteEmployee);
+router.delete('/:id', validateAdcoToken, employeeController.deleteEmployee);
 
 module.exports = router; 
