@@ -33,7 +33,7 @@ const assetController = {
     // Create new asset
     createAsset: async (req, res) => {
         try {
-            const { id, name, type, location, purchase_date, status, owner, comments } = req.body;
+            const { id, name, type, location, status, owner, comments } = req.body;
             
             await poolConnect;
             const result = await pool.request()
@@ -41,13 +41,12 @@ const assetController = {
                 .input('name', name)
                 .input('type', type)
                 .input('location', location)
-                .input('purchase_date', purchase_date)
                 .input('status', status)
                 .input('owner', owner)
                 .input('comments', comments)
                 .query(`
-                    INSERT INTO portalAssets (id, name, type, location, purchase_date, status, Owner, Comments)
-                    VALUES (@id, @name, @type, @location, @purchase_date, @status, @owner, @comments)
+                    INSERT INTO portalAssets (id, name, type, location, status, Owner, Comments)
+                    VALUES (@id, @name, @type, @location, @status, @owner, @comments)
                 `);
             
             res.status(201).json({ 
@@ -55,7 +54,6 @@ const assetController = {
                 name,
                 type,
                 location,
-                purchase_date,
                 status,
                 owner,
                 comments
@@ -69,7 +67,7 @@ const assetController = {
     // Update asset
     updateAsset: async (req, res) => {
         try {
-            const { name, type, location, purchase_date, status, owner, comments } = req.body;
+            const { name, type, location, status, owner, comments } = req.body;
             
             await poolConnect;
             const result = await pool.request()
@@ -77,7 +75,6 @@ const assetController = {
                 .input('name', name)
                 .input('type', type)
                 .input('location', location)
-                .input('purchase_date', purchase_date)
                 .input('status', status)
                 .input('owner', owner)
                 .input('comments', comments)
@@ -86,7 +83,6 @@ const assetController = {
                     SET name = @name,
                         type = @type,
                         location = @location,
-                        purchase_date = @purchase_date,
                         status = @status,
                         Owner = @owner,
                         Comments = @comments,
