@@ -1,28 +1,24 @@
-const { pool, poolConnect } = require('../config/database');
+const Project = require('../models/Project');
 
 const projectController = {
     // Get all projects
     getAllProjects: async (req, res) => {
         try {
-            await poolConnect;
-            const result = await pool.request().query('SELECT * FROM PortalProjects ORDER BY ProjectName');
-            res.json(result.recordset);
+            const projects = await Project.getAll();
+            res.json(projects);
         } catch (err) {
+            console.error('Error in getAllProjects:', err);
             res.status(500).json({ message: err.message });
         }
     },
 
-    // Get active projects (based on Status column)
+    // Get active projects only
     getActiveProjects: async (req, res) => {
         try {
-            await poolConnect;
-            const result = await pool.request().query(`
-                SELECT * FROM PortalProjects 
-                WHERE Status = 'Active'
-                ORDER BY ProjectName
-            `);
-            res.json(result.recordset);
+            const activeProjects = await Project.getActiveProjects();
+            res.json(activeProjects);
         } catch (err) {
+            console.error('Error in getActiveProjects:', err);
             res.status(500).json({ message: err.message });
         }
     },
@@ -30,17 +26,13 @@ const projectController = {
     // Get project by ID
     getProjectById: async (req, res) => {
         try {
-            await poolConnect;
-            const result = await pool.request()
-                .input('projectNo', req.params.id)
-                .query('SELECT * FROM PortalProjects WHERE ProjectNo = @projectNo');
-            
-            if (result.recordset.length === 0) {
+            const project = await Project.getById(req.params.id);
+            if (!project) {
                 return res.status(404).json({ message: 'Project not found' });
             }
-            
-            res.json(result.recordset[0]);
+            res.json(project);
         } catch (err) {
+            console.error('Error in getProjectById:', err);
             res.status(500).json({ message: err.message });
         }
     },
@@ -48,75 +40,27 @@ const projectController = {
     // Create new project
     createProject: async (req, res) => {
         try {
-            const { projectNo, projectName, startDate, finishDate } = req.body;
-
-            // Validate required fields
-            if (!projectNo || !projectName || !startDate) {
-                return res.status(400).json({ 
-                    message: 'ProjectNo, ProjectName, and StartDate are required' 
-                });
+            const created = await Project.create(req.body);
+            if (created) {
+                return res.status(201).json({ message: 'Project created successfully' });
             }
-            
-            await poolConnect;
-            const result = await pool.request()
-                .input('projectNo', projectNo)
-                .input('projectName', projectName)
-                .input('startDate', startDate)
-                .input('finishDate', finishDate)
-                .query(`
-                    INSERT INTO PortalProjects (ProjectNo, ProjectName, StartDate, FinishDate)
-                    VALUES (@projectNo, @projectName, @startDate, @finishDate)
-                `);
-            
-            res.status(201).json({ 
-                projectNo,
-                projectName,
-                startDate,
-                finishDate,
-                message: 'Project created successfully'
-            });
+            res.status(400).json({ message: 'Failed to create project' });
         } catch (err) {
-            console.error('Error creating project:', err);
-            if (err.number === 2627) { // Primary key violation
-                res.status(409).json({ message: 'Project number already exists' });
-            } else {
-                res.status(500).json({ message: err.message });
-            }
+            console.error('Error in createProject:', err);
+            res.status(500).json({ message: err.message });
         }
     },
 
     // Update project
     updateProject: async (req, res) => {
         try {
-            const { projectName, startDate, finishDate } = req.body;
-
-            // Validate required fields
-            if (!projectName || !startDate) {
-                return res.status(400).json({ 
-                    message: 'ProjectName and StartDate are required' 
-                });
+            const updated = await Project.update(req.params.id, req.body);
+            if (updated) {
+                return res.json({ message: 'Project updated successfully' });
             }
-            
-            await poolConnect;
-            const result = await pool.request()
-                .input('projectNo', req.params.id)
-                .input('projectName', projectName)
-                .input('startDate', startDate)
-                .input('finishDate', finishDate)
-                .query(`
-                    UPDATE PortalProjects 
-                    SET ProjectName = @projectName,
-                        StartDate = @startDate,
-                        FinishDate = @finishDate
-                    WHERE ProjectNo = @projectNo
-                `);
-            
-            if (result.rowsAffected[0] === 0) {
-                return res.status(404).json({ message: 'Project not found' });
-            }
-            
-            res.json({ message: 'Project updated successfully' });
+            res.status(404).json({ message: 'Project not found' });
         } catch (err) {
+            console.error('Error in updateProject:', err);
             res.status(500).json({ message: err.message });
         }
     },
@@ -124,17 +68,13 @@ const projectController = {
     // Delete project
     deleteProject: async (req, res) => {
         try {
-            await poolConnect;
-            const result = await pool.request()
-                .input('projectNo', req.params.id)
-                .query('DELETE FROM PortalProjects WHERE ProjectNo = @projectNo');
-            
-            if (result.rowsAffected[0] === 0) {
-                return res.status(404).json({ message: 'Project not found' });
+            const deleted = await Project.delete(req.params.id);
+            if (deleted) {
+                return res.json({ message: 'Project deleted successfully' });
             }
-            
-            res.json({ message: 'Project deleted successfully' });
+            res.status(404).json({ message: 'Project not found' });
         } catch (err) {
+            console.error('Error in deleteProject:', err);
             res.status(500).json({ message: err.message });
         }
     }

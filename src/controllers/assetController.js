@@ -17,8 +17,8 @@ const assetController = {
         try {
             await poolConnect;
             const result = await pool.request()
-                .input('assetId', req.params.id)
-                .query('SELECT * FROM portalAssets WHERE AssetID = @assetId');
+                .input('id', req.params.id)
+                .query('SELECT * FROM portalAssets WHERE id = @id');
             
             if (result.recordset.length === 0) {
                 return res.status(404).json({ message: 'Asset not found' });
@@ -33,80 +33,30 @@ const assetController = {
     // Create new asset
     createAsset: async (req, res) => {
         try {
-            const { 
-                AssetID, 
-                Description, 
-                AssetType, 
-                Location, 
-                Status, 
-                Owner, 
-                Comments, 
-                Responsible, 
-                Purchase_Date, 
-                Finish_Date, 
-                ScanFrequency 
-            } = req.body;
+            const { id, name, type, location, status, owner, comments } = req.body;
             
             await poolConnect;
             const result = await pool.request()
-                .input('AssetID', AssetID)
-                .input('Description', Description)
-                .input('AssetType', AssetType)
-                .input('Location', Location)
-                .input('Status', Status)
-                .input('Owner', Owner)
-                .input('Comments', Comments)
-                .input('Responsible', Responsible)
-                .input('Purchase_Date', Purchase_Date)
-                .input('Finish_Date', Finish_Date)
-                .input('ScanFrequency', ScanFrequency)
+                .input('id', id)
+                .input('name', name)
+                .input('type', type)
+                .input('location', location)
+                .input('status', status)
+                .input('owner', owner)
+                .input('comments', comments)
                 .query(`
-                    INSERT INTO portalAssets (
-                        AssetID, 
-                        Description, 
-                        AssetType, 
-                        Location, 
-                        Status, 
-                        Owner, 
-                        Comments, 
-                        Responsible, 
-                        Purchase_Date, 
-                        Finish_Date, 
-                        ScanFrequency, 
-                        created_at, 
-                        updated_at, 
-                        Last_Updated
-                    )
-                    VALUES (
-                        @AssetID, 
-                        @Description, 
-                        @AssetType, 
-                        @Location, 
-                        @Status, 
-                        @Owner, 
-                        @Comments, 
-                        @Responsible, 
-                        @Purchase_Date, 
-                        @Finish_Date, 
-                        @ScanFrequency, 
-                        GETDATE(), 
-                        GETDATE(), 
-                        GETDATE()
-                    )
+                    INSERT INTO portalAssets (id, name, type, location, status, Owner, Comments)
+                    VALUES (@id, @name, @type, @location, @status, @owner, @comments)
                 `);
             
             res.status(201).json({ 
-                AssetID,
-                Description,
-                AssetType,
-                Location,
-                Status,
-                Owner,
-                Comments,
-                Responsible,
-                Purchase_Date,
-                Finish_Date,
-                ScanFrequency
+                id,
+                name,
+                type,
+                location,
+                status,
+                owner,
+                comments
             });
         } catch (err) {
             console.error('Error creating asset:', err);
@@ -117,47 +67,27 @@ const assetController = {
     // Update asset
     updateAsset: async (req, res) => {
         try {
-            const { 
-                Description, 
-                AssetType, 
-                Location, 
-                Status, 
-                Owner, 
-                Comments, 
-                Responsible, 
-                Purchase_Date, 
-                Finish_Date, 
-                ScanFrequency 
-            } = req.body;
+            const { name, type, location, status, owner, comments } = req.body;
             
             await poolConnect;
             const result = await pool.request()
-                .input('AssetID', req.params.id)
-                .input('Description', Description)
-                .input('AssetType', AssetType)
-                .input('Location', Location)
-                .input('Status', Status)
-                .input('Owner', Owner)
-                .input('Comments', Comments)
-                .input('Responsible', Responsible)
-                .input('Purchase_Date', Purchase_Date)
-                .input('Finish_Date', Finish_Date)
-                .input('ScanFrequency', ScanFrequency)
+                .input('id', req.params.id)
+                .input('name', name)
+                .input('type', type)
+                .input('location', location)
+                .input('status', status)
+                .input('owner', owner)
+                .input('comments', comments)
                 .query(`
                     UPDATE portalAssets 
-                    SET Description = @Description,
-                        AssetType = @AssetType,
-                        Location = @Location,
-                        Status = @Status,
-                        Owner = @Owner,
-                        Comments = @Comments,
-                        Responsible = @Responsible,
-                        Purchase_Date = @Purchase_Date,
-                        Finish_Date = @Finish_Date,
-                        ScanFrequency = @ScanFrequency,
-                        updated_at = GETDATE(),
-                        Last_Updated = GETDATE()
-                    WHERE AssetID = @AssetID
+                    SET name = @name,
+                        type = @type,
+                        location = @location,
+                        status = @status,
+                        Owner = @owner,
+                        Comments = @comments,
+                        updated_at = GETDATE()
+                    WHERE id = @id
                 `);
             
             if (result.rowsAffected[0] === 0) {
@@ -175,8 +105,8 @@ const assetController = {
         try {
             await poolConnect;
             const result = await pool.request()
-                .input('AssetID', req.params.id)
-                .query('DELETE FROM portalAssets WHERE AssetID = @AssetID');
+                .input('id', req.params.id)
+                .query('DELETE FROM portalAssets WHERE id = @id');
             
             if (result.rowsAffected[0] === 0) {
                 return res.status(404).json({ message: 'Asset not found' });
@@ -196,13 +126,13 @@ const assetController = {
                 SELECT 
                     ah.id,
                     ah.asset_id,
-                    a.Description as asset_name,
+                    a.name as asset_name,
                     ah.location,
                     ah.status,
                     ah.updated_at,
                     ah.updated_by
                 FROM portalAssetHistory ah
-                JOIN portalAssets a ON ah.asset_id = a.AssetID
+                JOIN portalAssets a ON ah.asset_id = a.id
                 ORDER BY ah.updated_at DESC
             `);
             res.json(result.recordset);
