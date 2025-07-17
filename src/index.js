@@ -80,7 +80,7 @@ async function initializeApp() {
         
         let authRouter, eventRoutes, employeeRoutes, assetRoutes, quickLinkRoutes, 
             subcontractorRoutes, calendarRoutes, erpTutorialRoutes, safetyContentRoutes, 
-            autodeskTutorialRoutes, fileOpenerRoutes;
+            autodeskTutorialRoutes, fileOpenerRoutes, projectRoutes;
 
         try {
             const authModule = require('./routes/auth');
@@ -116,6 +116,7 @@ async function initializeApp() {
         safetyContentRoutes = loadRoute('Safety Content', './routes/safetyContent');
         autodeskTutorialRoutes = loadRoute('Autodesk Tutorial', './routes/autodeskTutorials');
         fileOpenerRoutes = loadRoute('File Opener', './routes/fileOpenerRoutes');
+        projectRoutes = loadRoute('Project', './routes/projectRoutes');
 
         const app = express();
 
@@ -160,6 +161,7 @@ async function initializeApp() {
         app.use('/api/erp-tutorials', erpTutorialRoutes);
         app.use('/api/safety-content', safetyContentRoutes);
         app.use('/api/autodesk-tutorials', autodeskTutorialRoutes);
+        app.use('/api/projects', projectRoutes);
 
         // File opener routes with in-memory token store (3-minute expiry)
         app.use('/api/file-opener', fileOpenerRoutes);

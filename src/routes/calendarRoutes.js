@@ -3,7 +3,7 @@ const router = express.Router();
 const validateAdcoToken = require('../middleware/validateAdcoToken');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
-// GET /api/calendar/events - Fetch events from the info@adco.ie shared calendar
+// GET /api/calendar/events - Fetch events from the calendar@adco.ie shared calendar
 router.get('/events', validateAdcoToken, async (req, res) => {
   try {
     // Extract token from Authorization header (set by validateAdcoToken middleware)
@@ -15,8 +15,8 @@ router.get('/events', validateAdcoToken, async (req, res) => {
       return res.status(401).json({ error: 'No access token found.' });
     }
 
-    // Use the shared calendar for info@adco.ie
-    const calendarEmail = process.env.CALENDAR_EMAIL || 'info@adco.ie';
+    // Use the shared calendar for calendar@adco.ie
+    const calendarEmail = process.env.CALENDAR_EMAIL || 'calendar@adco.ie';
     const timezone = process.env.CALENDAR_TIMEZONE || 'Europe/Dublin';
     const graphApiUrl = `https://graph.microsoft.com/v1.0/users/${calendarEmail}/calendar/events`;
     console.log('Fetching calendar events from:', graphApiUrl);

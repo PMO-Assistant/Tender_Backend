@@ -35,9 +35,13 @@ class Asset {
                 .input('quantity', asset.quantity)
                 .input('owner', asset.owner)
                 .input('comments', asset.comments)
+                .input('responsible', asset.responsible)
+                .input('purchaseDate', asset.purchaseDate)
+                .input('finishDate', asset.finishDate)
+                .input('scanFrequency', asset.scanFrequency)
                 .query(`
-                    INSERT INTO portalAssets (id, name, type, location, status, quantity, owner, comments)
-                    VALUES (@id, @name, @type, @location, @status, @quantity, @owner, @comments)
+                    INSERT INTO portalAssets (id, name, type, location, status, quantity, owner, comments, Responsible, Purchase_Date, Finish_Date, ScanFrequency, Last_Updated)
+                    VALUES (@id, @name, @type, @location, @status, @quantity, @owner, @comments, @responsible, @purchaseDate, @finishDate, @scanFrequency, GETDATE())
                 `);
             return result.rowsAffected[0] > 0;
         } catch (err) {
@@ -57,6 +61,10 @@ class Asset {
                 .input('quantity', asset.quantity)
                 .input('owner', asset.owner)
                 .input('comments', asset.comments)
+                .input('responsible', asset.responsible)
+                .input('purchaseDate', asset.purchaseDate)
+                .input('finishDate', asset.finishDate)
+                .input('scanFrequency', asset.scanFrequency)
                 .query(`
                     UPDATE portalAssets 
                     SET name = @name,
@@ -66,7 +74,11 @@ class Asset {
                         quantity = @quantity,
                         owner = @owner,
                         comments = @comments,
-                        updated_at = GETDATE()
+                        Responsible = @responsible,
+                        Purchase_Date = @purchaseDate,
+                        Finish_Date = @finishDate,
+                        ScanFrequency = @scanFrequency,
+                        Last_Updated = GETDATE()
                     WHERE id = @id
                 `);
             return result.rowsAffected[0] > 0;
