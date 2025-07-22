@@ -4,10 +4,14 @@ const cors = require('cors');
 const session = require('express-session');
 const { getConnectedPool } = require('./config/database');
 
+const cron = require('node-cron');
+const { checkAndNotifyOverdueAssets } = require('./controllers/mailController');
+
 // Environment variables with fallbacks
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'https://adcoportal.ie';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://adcoportal.ie';
 const NODE_ENV = process.env.NODE_ENV || 'development';
+const assetScanRoutes = require('./routes/assetScanRoutes');
 
 console.log('🚀 Starting ADCO Backend with configuration:', {
     CORS_ORIGIN,
@@ -165,6 +169,7 @@ async function initializeApp() {
 
         // File opener routes with in-memory token store (3-minute expiry)
         app.use('/api/file-opener', fileOpenerRoutes);
+        app.use('/api/asset-scans', assetScanRoutes);
 
         // 7. Health check endpoint
         app.get('/health', (req, res) => {
@@ -264,3 +269,10 @@ initializeApp().catch(error => {
     console.error('❌ Fatal error during initialization:', error);
     process.exit(1);
 });
+
+cron.schedule('30 15 * * *', () => {
+    console.log("⏳ Running overdue asset check at 3:30 PM…");
+    checkAndNotifyOverdueAssets();
+});
+
+
