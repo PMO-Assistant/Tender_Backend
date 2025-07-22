@@ -32,9 +32,11 @@ const assetScanController = {
                 sqlStatements.push(`
                     UPDATE portalAssets
                     SET Last_Updated = GETDATE(),
-                        Responsible = @Responsible_${index}
+                        Responsible = @Responsible_${index},
+                        Location = @Location_${index}
                     WHERE AssetID = @AssetID_${index};
                 `);
+                
             });
 
             await request.query(sqlStatements.join('\n'));
