@@ -1,0 +1,1231 @@
+const { getConnectedPool } = require('../../config/database');
+const { uploadFile, downloadFile, deleteFile } = require('../../config/azureBlobService');
+const multer = require('multer');
+const path = require('path');
+const mistralService = require('../../services/mistralService');
+
+// Configure multer for memory storage
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 100 * 1024 * 1024, // 100MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        // Allow all file types for now
+        cb(null, true);
+    }
+});
+
+const fileController = {
+    // Get all folders for the authenticated user
+    getAllFolders: async (req, res) => {
+        try {
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            console.log('Getting folders for user:', userId);
+
+            const result = await pool.request()
+                .input('UserID', userId)
+                .query(`
+                    SELECT 
+                        f.FolderID,
+                        f.ParentFolderID,
+                        f.FolderName,
+                        f.FolderPath,
+                        f.FolderType,
+                        f.DisplayOrder,
+                        f.IsActive,
+                        f.CreatedAt,
+                        f.UpdatedAt,
+                        f.DocID,
+                        f.ConnectionTable,
+                        u.Name as CreatedBy
+                    FROM tenderFolder f
+                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                    WHERE f.IsActive = 1
+                    ORDER BY f.DisplayOrder, f.FolderName
+                `);
+
+            console.log('Raw folders from DB:', result.recordset);
+
+            // Build folder hierarchy
+            const folders = result.recordset;
+            const folderMap = {};
+            const rootFolders = [];
+
+            // Create a map of folders by ID with correct property names
+            folders.forEach(folder => {
+                folderMap[folder.FolderID] = {
+                    id: folder.FolderID,
+                    name: folder.FolderName,
+                    path: folder.FolderPath,
+                    type: folder.FolderType,
+                    parentId: folder.ParentFolderID,
+                    displayOrder: folder.DisplayOrder,
+                    isActive: folder.IsActive,
+                    createdAt: folder.CreatedAt,
+                    updatedAt: folder.UpdatedAt,
+                    docId: folder.DocID,
+                    connectionTable: folder.ConnectionTable,
+                    createdBy: folder.CreatedBy,
+                    children: []
+                };
+            });
+
+            // Build the hierarchy
+            folders.forEach(folder => {
+                if (folder.ParentFolderID === null) {
+                    rootFolders.push(folderMap[folder.FolderID]);
+                } else if (folderMap[folder.ParentFolderID]) {
+                    folderMap[folder.ParentFolderID].children.push(folderMap[folder.FolderID]);
+                }
+            });
+
+            console.log('Processed folders:', rootFolders);
+
+            res.json({ folders: rootFolders });
+        } catch (error) {
+            console.error('Error getting folders:', error);
+            res.status(500).json({ message: 'Failed to get folders' });
+        }
+    },
+
+    // Get files by folder ID
+    getFilesByFolder: async (req, res) => {
+        try {
+            const { folderId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            const result = await pool.request()
+                .input('FolderID', folderId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT 
+                        f.FileID as id,
+                        f.DisplayName as name,
+                        f.ContentType as contentType,
+                        f.Size as size,
+                        f.UploadedOn as uploadedOn,
+                        f.CreatedAt as createdAt,
+                        f.UpdatedAt as updatedAt,
+                        f.FolderID as folderId,
+                        f.DocID as docId,
+                        f.ConnectionTable as connectionTable,
+                        f.Metadata as metadata,
+                        fl.FolderName as folderName,
+                        fl.FolderPath as folderPath,
+                        u.Name as uploadedBy,
+                        CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred
+                    FROM tenderFile f
+                    LEFT JOIN tenderFolder fl ON f.FolderID = fl.FolderID
+                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                    LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+                    WHERE f.FolderID = @FolderID 
+                    AND f.IsDeleted = 0
+                    ORDER BY f.CreatedAt DESC
+                `);
+
+            // Map the results to frontend format
+            const files = result.recordset.map(file => ({
+                id: file.id,
+                name: file.name,
+                type: getFileType(file.contentType, file.name),
+                size: file.size,
+                uploadedOn: file.uploadedOn,
+                createdAt: file.createdAt,
+                updatedAt: file.updatedAt,
+                folderId: file.folderId,
+                folderName: file.folderName,
+                folderPath: file.folderPath,
+                docId: file.docId,
+                connectionTable: file.connectionTable,
+                metadata: file.metadata ? JSON.parse(file.metadata) : null,
+                uploadedBy: file.uploadedBy,
+                isStarred: file.isStarred === 1
+            }));
+
+            res.json({ files });
+        } catch (error) {
+            console.error('Error getting files by folder:', error);
+            res.status(500).json({ message: 'Failed to get files' });
+        }
+    },
+
+    // Check and create task folder if it doesn't exist (UPDATED with DocID and ConnectionTable)
+    ensureTaskFolder: async (req, res) => {
+        try {
+            const { taskId, taskDescription } = req.body;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!taskId || !taskDescription) {
+                return res.status(400).json({ message: 'Task ID and description are required' });
+            }
+
+            // First, get the Tasks folder ID
+            const tasksFolderResult = await pool.request()
+                .query(`
+                    SELECT FolderID 
+                    FROM tenderFolder 
+                    WHERE FolderName = 'Tasks' AND FolderType = 'main'
+                `);
+
+            if (tasksFolderResult.recordset.length === 0) {
+                return res.status(404).json({ message: 'Tasks folder not found' });
+            }
+
+            const tasksFolderId = tasksFolderResult.recordset[0].FolderID;
+            const taskFolderName = `${taskId} - ${taskDescription}`;
+            const taskFolderPath = `/Tasks/${taskFolderName}`;
+
+            // Check if task folder already exists (by DocID and ConnectionTable)
+            const existingFolderResult = await pool.request()
+                .input('DocID', taskId)
+                .input('ConnectionTable', 'tenderTask')
+                .input('ParentFolderID', tasksFolderId)
+                .query(`
+                    SELECT FolderID, FolderPath, FolderName
+                    FROM tenderFolder 
+                    WHERE DocID = @DocID 
+                      AND ConnectionTable = @ConnectionTable 
+                      AND ParentFolderID = @ParentFolderID
+                `);
+
+            if (existingFolderResult.recordset.length > 0) {
+                // Folder exists, return its info
+                const existingFolder = existingFolderResult.recordset[0];
+                return res.json({ 
+                    folderId: existingFolder.FolderID,
+                    folderPath: existingFolder.FolderPath,
+                    folderName: existingFolder.FolderName,
+                    exists: true,
+                    docId: taskId,
+                    connectionTable: 'tenderTask'
+                });
+            }
+
+            // Create the task folder with DocID and ConnectionTable
+            const insertResult = await pool.request()
+                .input('FolderName', taskFolderName)
+                .input('FolderPath', taskFolderPath)
+                .input('FolderType', 'sub')
+                .input('ParentFolderID', tasksFolderId)
+                .input('AddBy', userId)
+                .input('DocID', taskId)
+                .input('ConnectionTable', 'tenderTask')
+                .query(`
+                    INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                    OUTPUT INSERTED.FolderID, INSERTED.FolderPath
+                    VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                `);
+
+            const newFolder = insertResult.recordset[0];
+            
+            res.json({ 
+                folderId: newFolder.FolderID,
+                folderPath: newFolder.FolderPath,
+                folderName: taskFolderName,
+                exists: false,
+                docId: taskId,
+                connectionTable: 'tenderTask'
+            });
+
+        } catch (error) {
+            console.error('Error ensuring task folder:', error);
+            res.status(500).json({ message: 'Failed to ensure task folder' });
+        }
+    },
+
+    // Check and create tender folder (and standard subfolders) if it doesn't exist
+    ensureTenderFolder: async (req, res) => {
+        try {
+            const { tenderId, projectName } = req.body;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!tenderId || !projectName) {
+                return res.status(400).json({ message: 'tenderId and projectName are required' });
+            }
+
+            const rootTenderFolderId = 2; // Parent "Tender" folder
+            const safeProjectName = String(projectName || '').trim();
+            const tenderFolderName = `${tenderId} - ${safeProjectName}`;
+            const tenderFolderPath = `/Tender/${tenderFolderName}`;
+
+            // Check if exists by DocID + ConnectionTable + Parent
+            const existingFolderResult = await pool.request()
+                .input('DocID', tenderId)
+                .input('ConnectionTable', 'tenderTender')
+                .input('ParentFolderID', rootTenderFolderId)
+                .query(`
+                    SELECT FolderID, FolderPath, FolderName
+                    FROM tenderFolder 
+                    WHERE DocID = @DocID 
+                      AND ConnectionTable = @ConnectionTable 
+                      AND ParentFolderID = @ParentFolderID
+                `);
+
+            let tenderFolderId;
+            if (existingFolderResult.recordset.length > 0) {
+                tenderFolderId = existingFolderResult.recordset[0].FolderID;
+            } else {
+                const insertResult = await pool.request()
+                    .input('FolderName', tenderFolderName)
+                    .input('FolderPath', tenderFolderPath)
+                    .input('FolderType', 'sub')
+                    .input('ParentFolderID', rootTenderFolderId)
+                    .input('AddBy', userId)
+                    .input('DocID', tenderId)
+                    .input('ConnectionTable', 'tenderTender')
+                    .query(`
+                        INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                        OUTPUT INSERTED.FolderID
+                        VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                    `);
+                tenderFolderId = insertResult.recordset[0].FolderID;
+            }
+
+            const subNames = ['General', 'RFI', 'BOQ', 'SAQ'];
+            const subfolderIds = {};
+            for (const name of subNames) {
+                const existsSub = await pool.request()
+                    .input('ParentFolderID', tenderFolderId)
+                    .input('FolderName', name)
+                    .query(`
+                        SELECT TOP 1 FolderID FROM tenderFolder
+                        WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                    `);
+                if (existsSub.recordset.length > 0) {
+                    subfolderIds[name] = existsSub.recordset[0].FolderID;
+                } else {
+                    const subPath = `${tenderFolderPath}/${name}`;
+                    const insertedSub = await pool.request()
+                        .input('FolderName', name)
+                        .input('FolderPath', subPath)
+                        .input('FolderType', 'sub')
+                        .input('ParentFolderID', tenderFolderId)
+                        .input('AddBy', userId)
+                        .input('DocID', tenderId)
+                        .input('ConnectionTable', 'tenderTender')
+                        .query(`
+                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                            OUTPUT INSERTED.FolderID
+                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                        `);
+                    subfolderIds[name] = insertedSub.recordset[0].FolderID;
+                }
+            }
+
+            res.json({
+                folderId: tenderFolderId,
+                folderPath: tenderFolderPath,
+                subfolders: subfolderIds
+            });
+        } catch (error) {
+            console.error('Error ensuring tender folder:', error);
+            res.status(500).json({ message: 'Failed to ensure tender folder' });
+        }
+    },
+
+    // Get files by document ID and connection table (NEW FUNCTION)
+    getFilesByDocument: async (req, res) => {
+        try {
+            const { docId, connectionTable } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            const result = await pool.request()
+                .input('DocID', docId)
+                .input('ConnectionTable', connectionTable)
+                .input('UserID', userId)
+                .query(`
+                    SELECT 
+    f.FileID as id,
+    f.DisplayName as name,
+    f.ContentType as contentType,
+    f.Size as size,
+    f.UploadedOn as uploadedOn,
+    f.CreatedAt as createdAt,
+    f.UpdatedAt as updatedAt,
+    f.FolderID as folderId,
+    f.DocID as docId,                 -- add
+    f.ConnectionTable as connectionTable,  -- add
+    f.Metadata as metadata,           -- add
+    fl.FolderName as folderName,
+    fl.FolderPath as folderPath,
+    u.Name as uploadedBy,
+    CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred
+FROM tenderFile f
+LEFT JOIN tenderFolder fl ON f.FolderID = fl.FolderID
+LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+WHERE f.DocID = @DocID 
+  AND f.ConnectionTable = @ConnectionTable
+  AND f.IsDeleted = 0
+ORDER BY f.CreatedAt DESC;
+                `);
+
+            // Map the results to frontend format
+            const files = result.recordset.map(file => ({
+                id: file.id,
+                name: file.name,
+                type: getFileType(file.contentType, file.name),
+                size: file.size,
+                uploadedOn: file.uploadedOn,
+                createdAt: file.createdAt,
+                updatedAt: file.updatedAt,
+                folderId: file.folderId,
+                folderName: file.folderName,
+                folderPath: file.folderPath,
+                uploadedBy: file.uploadedBy,
+                docId: file.docId,
+                connectionTable: file.connectionTable,
+                metadata: file.metadata ? JSON.parse(file.metadata) : null,
+                isStarred: file.isStarred === 1
+            }));
+
+            res.json({ files });
+        } catch (error) {
+            console.error('Error getting files by document:', error);
+            res.status(500).json({ message: 'Failed to get files' });
+        }
+    },
+
+    // Get all files for the authenticated user (updated to include folder info)
+    getAllFiles: async (req, res) => {
+        try {
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            const result = await pool.request()
+                .input('UserID', userId)
+                .query(`
+                    SELECT 
+                        f.FileID,
+                        f.DisplayName,
+                        f.BlobPath,
+                        f.UploadedOn,
+                        f.Size,
+                        f.ContentType,
+                        f.Status,
+                        f.CreatedAt,
+                        f.UpdatedAt,
+                        f.DocID,
+                        f.ConnectionTable,
+                        f.Metadata,
+                        u.Name as UploadedBy,
+                        tf.FolderID,
+                        tf.FolderName,
+                        tf.FolderPath,
+                        CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred
+                    FROM tenderFile f
+                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                    LEFT JOIN tenderFolder tf ON f.FolderID = tf.FolderID
+                    LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+                    WHERE f.IsDeleted = 0 AND f.AddBy = @UserID
+                    ORDER BY f.CreatedAt DESC
+                `);
+
+            const files = result.recordset.map(file => ({
+                id: file.FileID,
+                name: file.DisplayName,
+                blobPath: file.BlobPath,
+                uploadedOn: file.UploadedOn,
+                size: file.Size,
+                contentType: file.ContentType,
+                status: file.Status,
+                createdAt: file.CreatedAt,
+                updatedAt: file.UpdatedAt,
+                uploadedBy: file.UploadedBy,
+                folderId: file.FolderID,
+                folderName: file.FolderName,
+                folderPath: file.FolderPath,
+                docId: file.DocID,
+                connectionTable: file.ConnectionTable,
+                metadata: file.Metadata ? JSON.parse(file.Metadata) : null,
+                type: getFileType(file.ContentType, file.DisplayName),
+                isStarred: file.isStarred === 1
+            }));
+
+            res.json({ files });
+        } catch (error) {
+            console.error('Error getting files:', error);
+            res.status(500).json({ message: 'Failed to get files' });
+        }
+    },
+
+    // Get file by ID
+    getFileById: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT 
+                        f.FileID,
+                        f.DisplayName,
+                        f.BlobPath,
+                        f.UploadedOn,
+                        f.Size,
+                        f.ContentType,
+                        f.Status,
+                        f.CreatedAt,
+                        f.UpdatedAt,
+                        f.DocID,
+                        f.ConnectionTable,
+                        f.Metadata,
+                        u.Name as UploadedBy,
+                        tf.FolderID,
+                        tf.FolderName,
+                        tf.FolderPath
+                    FROM tenderFile f
+                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                    LEFT JOIN tenderFolder tf ON f.FolderID = tf.FolderID
+                    WHERE f.FileID = @FileID AND f.AddBy = @UserID AND f.IsDeleted = 0
+                `);
+
+            if (result.recordset.length === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            const file = result.recordset[0];
+            res.json({
+                id: file.FileID,
+                name: file.DisplayName,
+                blobPath: file.BlobPath,
+                uploadedOn: file.UploadedOn,
+                size: file.Size,
+                contentType: file.ContentType,
+                status: file.Status,
+                createdAt: file.CreatedAt,
+                updatedAt: file.UpdatedAt,
+                uploadedBy: file.UploadedBy,
+                folderId: file.FolderID,
+                folderName: file.FolderName,
+                folderPath: file.FolderPath,
+                docId: file.DocID,
+                connectionTable: file.ConnectionTable,
+                type: getFileType(file.ContentType, file.DisplayName),
+                metadata: file.Metadata ? JSON.parse(file.Metadata) : null
+            });
+        } catch (error) {
+            console.error('Error getting file:', error);
+            res.status(500).json({ message: 'Failed to get file' });
+        }
+    },
+
+    // Test file upload without Azure storage
+    testFileUpload: async (req, res) => {
+        try {
+            if (!req.file) {
+                return res.status(400).json({ message: 'No file uploaded' });
+            }
+
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+            const { originalname, buffer, mimetype, size } = req.file;
+
+            console.log('Test file upload:', {
+                fileName: originalname,
+                contentType: mimetype,
+                size: size,
+                userId
+            });
+
+            // Extract metadata using Mistral AI
+            const metadata = await mistralService.extractMetadata(buffer, originalname, mimetype);
+            
+            console.log('Metadata extraction result:', {
+                hasMetadata: !!metadata,
+                hasText: !!metadata?.extractedText,
+                textLength: metadata?.textLength || 0
+            });
+
+            // Test database insert with minimal data
+            const testResult = await pool.request()
+                .input('AddBy', parseInt(userId))
+                .input('FolderID', 1) // Use folder 1 for testing
+                .input('BlobPath', 'test/test.txt')
+                .input('DisplayName', originalname)
+                .input('Size', parseInt(size)) // Ensure size is an integer
+                .input('ContentType', mimetype)
+                .input('Status', 1)
+                .input('DocID', 1) // Use doc ID 1 for testing
+                .input('ConnectionTable', 'test')
+                .input('Metadata', JSON.stringify(metadata))
+                .input('ExtractedText', metadata?.extractedText || null)
+                .query(`
+                    INSERT INTO tenderFile (AddBy, FolderID, BlobPath, DisplayName, UploadedOn, Size, ContentType, Status, DocID, ConnectionTable, Metadata, ExtractedText)
+                    VALUES (@AddBy, @FolderID, @BlobPath, @DisplayName, GETDATE(), @Size, @ContentType, @Status, @DocID, @ConnectionTable, @Metadata, @ExtractedText);
+
+                    SELECT SCOPE_IDENTITY() as FileID;
+                `);
+
+            const fileId = testResult.recordset[0].FileID;
+            console.log('Test file saved to database with ID:', fileId);
+
+            res.json({
+                message: 'Test file upload successful',
+                fileId: fileId,
+                fileName: originalname,
+                size: size,
+                metadata: metadata,
+                hasText: !!metadata?.extractedText,
+                textLength: metadata?.textLength || 0
+            });
+
+        } catch (error) {
+            console.error('Test file upload failed:', error);
+            res.status(500).json({ 
+                message: 'Test file upload failed',
+                error: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            });
+        }
+    },
+
+    // Check table structure without authentication
+    checkTableStructure: async (req, res) => {
+        try {
+            const pool = await getConnectedPool();
+            
+            // Check tenderFile table structure
+            const tableResult = await pool.request().query(`
+                SELECT 
+                    COLUMN_NAME, 
+                    DATA_TYPE, 
+                    IS_NULLABLE,
+                    CHARACTER_MAXIMUM_LENGTH,
+                    NUMERIC_PRECISION,
+                    NUMERIC_SCALE
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'tenderFile' 
+                ORDER BY ORDINAL_POSITION
+            `);
+            
+            console.log('tenderFile table structure:', tableResult.recordset);
+            
+            res.json({
+                message: 'Table structure retrieved',
+                tableStructure: tableResult.recordset
+            });
+        } catch (error) {
+            console.error('Table structure check failed:', error);
+            res.status(500).json({ 
+                message: 'Table structure check failed',
+                error: error.message 
+            });
+        }
+    },
+
+    // Test endpoint to verify database connectivity
+    testDatabase: async (req, res) => {
+        try {
+            const pool = await getConnectedPool();
+            
+            // Test basic connection
+            const testResult = await pool.request().query('SELECT 1 as test');
+            console.log('Database connection test:', testResult.recordset);
+            
+            // Test tenderFile table structure
+            const tableResult = await pool.request().query(`
+                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'tenderFile' 
+                ORDER BY ORDINAL_POSITION
+            `);
+            
+            console.log('tenderFile table structure:', tableResult.recordset);
+            
+            res.json({
+                message: 'Database connection successful',
+                connectionTest: testResult.recordset[0],
+                tableStructure: tableResult.recordset
+            });
+        } catch (error) {
+            console.error('Database test failed:', error);
+            res.status(500).json({ 
+                message: 'Database test failed',
+                error: error.message 
+            });
+        }
+    },
+
+    // Upload file (updated to handle folder assignment and document linking)
+    uploadFile: async (req, res) => {
+        try {
+            if (!req.file) {
+                return res.status(400).json({ message: 'No file uploaded' });
+            }
+
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+            const { originalname, buffer, mimetype, size } = req.file;
+            let folderId = req.body.folderId || null;
+            let docId = req.body.docId || null;
+            let connectionTable = req.body.connectionTable || null;
+            const tenderId = req.body.tenderId || req.body.TenderID || null;
+            const rfiId = req.body.rfiId || req.body.RfiId || req.body.RFIID || null;
+
+            console.log('File upload request:', {
+                fileName: originalname,
+                contentType: mimetype,
+                size: size,
+                folderId,
+                docId,
+                connectionTable,
+                userId
+            });
+
+            // Fallback assignment to support tender/RFI contexts
+            if (!docId) {
+                if (rfiId) docId = rfiId;
+                else if (tenderId) docId = tenderId;
+            }
+            if (!connectionTable) {
+                if (rfiId) connectionTable = 'tenderRFI';
+                else if (tenderId) connectionTable = 'tender';
+            }
+
+            // Resolve proper FolderID for Tender/RFI hierarchy
+            if (tenderId) {
+                try {
+                    // 1) Find tender root folder under parent Tender (2), linked to tenderTender by DocID
+                    const tenderRoot = await pool.request()
+                        .input('TenderID', parseInt(tenderId))
+                        .query(`
+                            SELECT TOP 1 tf.FolderID
+                            FROM tenderFolder tf
+                            WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.ParentFolderID = 2
+                        `);
+                    const tenderRootId = tenderRoot.recordset?.[0]?.FolderID || null;
+
+                    if (tenderRootId) {
+                        // 2) Prefer RFI subfolder when RFI context
+                        if (rfiId) {
+                            const rfiFolder = await pool.request()
+                                .input('ParentFolderID', tenderRootId)
+                                .query(`
+                                    SELECT TOP 1 FolderID
+                                    FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID AND FolderName = 'RFI'
+                                `);
+                            if (rfiFolder.recordset.length > 0) {
+                                folderId = rfiFolder.recordset[0].FolderID;
+                            } else if (!folderId) {
+                                // If RFI folder missing and no explicit folder was provided, fallback to tender root
+                                folderId = tenderRootId;
+                            }
+                        } else if (!folderId) {
+                            // Not an RFI upload and no explicit folder: fall back to tender root
+                            folderId = tenderRootId;
+                        }
+                    }
+                } catch (resolveErr) {
+                    console.warn('Warning: failed to resolve Tender/RFI folder, will require explicit FolderID', resolveErr?.message);
+                }
+            }
+
+            // Validate required fields after fallback
+            if (!folderId || !docId || !connectionTable) {
+                return res.status(400).json({ 
+                    message: 'Missing required fields: folderId, docId, connectionTable' 
+                });
+            }
+
+            // Generate unique blob path
+            const timestamp = Date.now();
+            const blobPath = `uploads/${timestamp}_${originalname}`;
+
+            console.log('Starting metadata extraction...');
+            
+            // Extract metadata using Mistral AI
+            const metadata = await mistralService.extractMetadata(buffer, originalname, mimetype);
+            
+            console.log('Metadata extraction completed:', {
+                hasMetadata: !!metadata,
+                hasText: !!metadata?.extractedText,
+                textLength: metadata?.textLength || 0
+            });
+
+            console.log('Saving file to database...');
+            
+            // Save file record to database with DocID, ConnectionTable, Metadata, and ExtractedText
+            const result = await pool.request()
+                .input('AddBy', parseInt(userId))
+                .input('FolderID', parseInt(folderId))
+                .input('BlobPath', blobPath)
+                .input('DisplayName', originalname)
+                .input('Size', parseInt(size)) // Ensure size is an integer
+                .input('ContentType', mimetype)
+                .input('Status', 1) // Changed from 'Active' to 1 for bit column
+                .input('DocID', parseInt(docId)) // Ensure docId is an integer
+                .input('ConnectionTable', connectionTable)
+                .input('Metadata', JSON.stringify(metadata))
+                .input('ExtractedText', metadata?.extractedText || null)
+                .query(`
+                    INSERT INTO tenderFile (AddBy, FolderID, BlobPath, DisplayName, UploadedOn, Size, ContentType, Status, DocID, ConnectionTable, Metadata, ExtractedText)
+                    VALUES (@AddBy, @FolderID, @BlobPath, @DisplayName, GETDATE(), @Size, @ContentType, @Status, @DocID, @ConnectionTable, @Metadata, @ExtractedText);
+
+                    SELECT SCOPE_IDENTITY() as FileID;
+                `);
+
+            const fileId = result.recordset[0].FileID;
+            console.log('File saved to database with ID:', fileId);
+
+            // Upload to Azure Blob Storage
+            try {
+                const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+                
+                const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+                const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+                const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
+
+                if (!account || !accountKey || !containerName) {
+                    console.error('Azure Storage configuration missing');
+                    return res.status(500).json({ error: 'Azure Storage configuration missing' });
+                }
+
+                const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+                const blobServiceClient = new BlobServiceClient(
+                    `https://${account}.blob.core.windows.net`,
+                    sharedKeyCredential
+                );
+                const containerClient = blobServiceClient.getContainerClient(containerName);
+                const blockBlobClient = containerClient.getBlockBlobClient(blobPath);
+                
+                await blockBlobClient.upload(buffer, buffer.length, {
+                    blobHTTPHeaders: {
+                        blobContentType: mimetype
+                    }
+                });
+                
+                console.log('File uploaded to Azure Blob Storage successfully');
+            } catch (azureError) {
+                console.error('Azure Blob Storage upload failed:', azureError);
+                // Don't fail the entire request if Azure upload fails
+                // The file record is already saved in the database
+            }
+
+            console.log('File upload completed successfully');
+
+            res.status(201).json({
+                message: 'File uploaded successfully',
+                fileId: fileId,
+                fileName: originalname,
+                size: size,
+                metadata: metadata
+            });
+
+        } catch (error) {
+            console.error('Error uploading file:', error);
+            res.status(500).json({ 
+                message: 'Failed to upload file',
+                error: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            });
+        }
+    },
+
+    // Download file
+    downloadFile: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            console.log(`🔍 Download request for file ID: ${fileId} by user: ${userId}`);
+
+            // Get file info
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT DisplayName, BlobPath, ContentType
+                    FROM tenderFile
+                    WHERE FileID = @FileID AND AddBy = @UserID AND IsDeleted = 0
+                `);
+
+            if (result.recordset.length === 0) {
+                console.log(`❌ File not found: FileID=${fileId}, UserID=${userId}`);
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            const file = result.recordset[0];
+            console.log(`📁 File found: ${file.DisplayName}, BlobPath: ${file.BlobPath}, ContentType: ${file.ContentType}`);
+
+            // Download from Azure Blob Storage
+            const stream = await downloadFile(file.BlobPath);
+            
+            if (!stream) {
+                console.error('❌ No stream returned from Azure Blob Storage');
+                return res.status(500).json({ message: 'Failed to get file stream' });
+            }
+
+            // Set headers for download
+            res.setHeader('Content-Type', file.ContentType || 'application/octet-stream');
+            res.setHeader('Content-Disposition', `attachment; filename="${file.DisplayName}"`);
+
+            console.log(`✅ Starting file download: ${file.DisplayName}`);
+
+            // Pipe the stream to response
+            stream.pipe(res);
+        } catch (error) {
+            console.error('❌ Error downloading file:', error);
+            res.status(500).json({ message: 'Failed to download file', error: error.message });
+        }
+    },
+
+    // Delete file
+    deleteFile: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            // Get file info including blob path
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT BlobPath, DisplayName, ContentType
+                    FROM tenderFile
+                    WHERE FileID = @FileID AND AddBy = @UserID AND IsDeleted = 0
+                `);
+
+            if (result.recordset.length === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            const file = result.recordset[0];
+
+            try {
+                // Delete from Azure Blob Storage first
+                if (file.BlobPath) {
+                    const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
+                    await deleteBlobFile(file.BlobPath);
+                    console.log(`File deleted from blob storage: ${file.BlobPath}`);
+                }
+            } catch (blobError) {
+                console.error('Warning: Failed to delete file from blob storage:', blobError);
+                // Continue with database deletion even if blob deletion fails
+            }
+
+            // Hard delete from database
+            await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    DELETE FROM tenderFile
+                    WHERE FileID = @FileID AND AddBy = @UserID
+                `);
+
+            console.log(`File deleted from database: ${file.DisplayName} (ID: ${fileId})`);
+            res.json({ message: 'File deleted successfully' });
+        } catch (error) {
+            console.error('Error deleting file:', error);
+            res.status(500).json({ message: 'Failed to delete file' });
+        }
+    },
+
+    // Update file name
+    updateFileName: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const { displayName } = req.body;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!displayName || displayName.trim() === '') {
+                return res.status(400).json({ message: 'Display name is required' });
+            }
+
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .input('DisplayName', displayName.trim())
+                .query(`
+                    UPDATE tenderFile
+                    SET DisplayName = @DisplayName, UpdatedAt = GETDATE()
+                    WHERE FileID = @FileID AND AddBy = @UserID AND IsDeleted = 0;
+                    
+                    SELECT @@ROWCOUNT as UpdatedRows;
+                `);
+
+            if (result.recordset[0].UpdatedRows === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            res.json({ message: 'File name updated successfully' });
+        } catch (error) {
+            console.error('Error updating file name:', error);
+            res.status(500).json({ message: 'Failed to update file name' });
+        }
+    },
+
+    // Get file preview URL (for images, PDFs, etc.)
+    getFilePreviewUrl: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT BlobPath, ContentType
+                    FROM tenderFile
+                    WHERE FileID = @FileID AND AddBy = @UserID AND IsDeleted = 0
+                `);
+
+            if (result.recordset.length === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            const file = result.recordset[0];
+
+            // Generate SAS URL for preview (you might want to implement this)
+            // For now, return the blob path
+            res.json({
+                previewUrl: file.BlobPath,
+                contentType: file.ContentType
+            });
+        } catch (error) {
+            console.error('Error getting file preview:', error);
+            res.status(500).json({ message: 'Failed to get file preview' });
+        }
+    },
+
+    // Generate SAS URL for file viewing (for Excel files)
+    generateFileSASUrl: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const userId = req.user.UserID;
+
+            console.log('generateFileSASUrl called with:', { fileId, userId });
+
+            // Get the file details from database
+            const pool = await getConnectedPool();
+            const fileResult = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT f.BlobPath, f.DisplayName, f.ContentType, f.AddBy, ta.Admin
+                    FROM tenderFile f
+                    LEFT JOIN tenderAccess ta ON ta.UserID = @UserID
+                    WHERE f.FileID = @FileID AND f.IsDeleted = 0
+                `);
+
+            if (fileResult.recordset.length === 0) {
+                return res.status(404).json({ error: 'File not found' });
+            }
+
+            const file = fileResult.recordset[0];
+            const isOwner = file.AddBy === userId;
+            const isAdmin = file.Admin === 1;
+
+            if (!isOwner && !isAdmin) {
+                return res.status(403).json({ error: 'Access denied' });
+            }
+
+            // Check if it's an Excel file
+            const isExcelFile = file.ContentType.includes('spreadsheet') || 
+                               file.ContentType.includes('excel') ||
+                               file.DisplayName.toLowerCase().endsWith('.xlsx') ||
+                               file.DisplayName.toLowerCase().endsWith('.xls');
+
+            if (!isExcelFile) {
+                return res.status(400).json({ error: 'File is not an Excel file' });
+            }
+
+            // Generate SAS URL for the blob
+            const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+            const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+            const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
+
+            if (!account || !accountKey || !containerName) {
+                console.error('Azure Storage configuration missing');
+                return res.status(500).json({ error: 'Azure Storage configuration missing' });
+            }
+
+            const { BlobServiceClient } = require('@azure/storage-blob');
+            const { StorageSharedKeyCredential } = require('@azure/storage-blob');
+
+            const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+            const blobServiceClient = new BlobServiceClient(
+                `https://${account}.blob.core.windows.net`,
+                sharedKeyCredential
+            );
+            const containerClient = blobServiceClient.getContainerClient(containerName);
+            const blobClient = containerClient.getBlobClient(file.BlobPath);
+
+            // Check if blob exists
+            const exists = await blobClient.exists();
+            if (!exists) {
+                return res.status(404).json({ error: 'File not found in storage' });
+            }
+
+            // Generate SAS URL with 1 hour expiry
+            const sasUrl = await blobClient.generateSasUrl({
+                permissions: 'r', // Read only
+                expiresOn: new Date(Date.now() + 60 * 60 * 1000), // 1 hour from now
+                protocol: 'https'
+            });
+
+            console.log('SAS URL generated successfully for file:', file.DisplayName);
+
+            // Return the SAS URL
+            res.json({ 
+                sasUrl: sasUrl,
+                fileName: file.DisplayName,
+                mimeType: file.ContentType
+            });
+
+        } catch (error) {
+            console.error('Error generating SAS URL:', error);
+            res.status(500).json({ error: 'Failed to generate SAS URL' });
+        }
+    },
+
+    // Get file metadata for display
+    getFileMetadata: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT 
+                        f.FileID,
+                        f.DisplayName,
+                        f.Metadata,
+                        f.ExtractedText,
+                        f.ContentType,
+                        f.Size,
+                        f.UploadedOn,
+                        f.AddBy
+                    FROM tenderFile f
+                    WHERE f.FileID = @FileID AND f.AddBy = @UserID AND f.IsDeleted = 0
+                `);
+
+            if (result.recordset.length === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            const file = result.recordset[0];
+            const metadata = file.Metadata ? JSON.parse(file.Metadata) : null;
+
+            res.json({
+                fileId: file.FileID,
+                fileName: file.DisplayName,
+                contentType: file.ContentType,
+                size: file.Size,
+                uploadedOn: file.UploadedOn,
+                metadata: metadata,
+                extractedText: file.ExtractedText,
+                hasMetadata: !!metadata,
+                hasText: !!file.ExtractedText
+            });
+        } catch (error) {
+            console.error('Error getting file metadata:', error);
+            res.status(500).json({ message: 'Failed to get file metadata' });
+        }
+    },
+
+    // New endpoint for searching through file content
+    searchFiles: async (req, res) => {
+        try {
+            const { query } = req.query;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!query || query.trim().length < 2) {
+                return res.status(400).json({ message: 'Search query must be at least 2 characters long' });
+            }
+
+            const result = await pool.request()
+                .input('UserID', userId)
+                .input('SearchQuery', `%${query.trim()}%`)
+                .query(`
+                    SELECT
+                        f.FileID,
+                        f.DisplayName,
+                        f.Size,
+                        f.ContentType,
+                        f.UploadedOn,
+                        f.AddBy,
+                        f.FolderID,
+                        f.DocID,
+                        f.ConnectionTable,
+                        f.Metadata,
+                        f.ExtractedText,
+                        u.Name as AddedByName
+                    FROM tenderFile f
+                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                    WHERE f.AddBy = @UserID 
+                        AND f.IsDeleted = 0
+                        AND (
+                            f.DisplayName LIKE @SearchQuery
+                            OR f.ExtractedText LIKE @SearchQuery
+                            OR f.Metadata LIKE @SearchQuery
+                        )
+                    ORDER BY f.UploadedOn DESC
+                `);
+
+            const files = result.recordset.map(file => ({
+                fileId: file.FileID,
+                fileName: file.DisplayName,
+                size: file.Size,
+                contentType: file.ContentType,
+                uploadedOn: file.UploadedOn,
+                addedBy: file.AddedByName,
+                folderId: file.FolderID,
+                docId: file.DocID,
+                connectionTable: file.ConnectionTable,
+                metadata: file.Metadata ? JSON.parse(file.Metadata) : null,
+                extractedText: file.ExtractedText,
+                hasText: !!file.ExtractedText
+            }));
+
+            res.json({ 
+                files,
+                searchQuery: query,
+                totalResults: files.length
+            });
+        } catch (error) {
+            console.error('Error searching files:', error);
+            res.status(500).json({ message: 'Failed to search files' });
+        }
+    }
+};
+
+// Helper function to determine file type
+function getFileType(contentType, fileName) {
+    const extension = path.extname(fileName).toLowerCase();
+    
+    if (contentType.startsWith('image/')) return 'image';
+    if (contentType.startsWith('video/')) return 'video';
+    if (contentType.startsWith('audio/')) return 'audio';
+    if (contentType.includes('pdf')) return 'pdf';
+    if (contentType.includes('excel') || extension === '.xlsx' || extension === '.xls') return 'excel';
+    if (contentType.includes('powerpoint') || extension === '.pptx' || extension === '.ppt') return 'powerpoint';
+    if (contentType.includes('word') || extension === '.docx' || extension === '.doc') return 'word';
+    if (extension === '.zip' || extension === '.rar' || extension === '.7z') return 'archive';
+    
+    return 'file';
+}
+
+module.exports = {
+    fileController,
+    upload
+}; 
