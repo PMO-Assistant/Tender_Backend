@@ -29,13 +29,15 @@
     "helmet": "^7.1.0",
     "https-proxy-agent": "^7.0.2",
     "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.10.0",
     "morgan": "^1.10.0",
     "mssql": "^10.0.1",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.7",
     "pdf-parse": "^1.1.1",
     "socks-proxy-agent": "^8.0.2",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
