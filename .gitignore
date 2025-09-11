@@ -3,3 +3,11 @@ node_modules
 # Ignore all Markdown and SQL files in backend
 *.md
 *.sql
+
+# Ignore secrets and keys
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_dsa
