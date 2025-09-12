@@ -26,10 +26,35 @@ const microsoftLogin = async (req, res) => {
       .query('SELECT UserID, Name, Email, Status FROM tenderEmployee WHERE Email = @email');
     
     if (result.recordset.length === 0) {
+      // Optional: auto-provision users for a specific domain in development
+      const allowedDomain = process.env.AUTH_ALLOWED_DOMAIN || ''
+      if (allowedDomain && typeof email === 'string' && email.toLowerCase().endsWith(`@${allowedDomain.toLowerCase()}`)) {
+        try {
+          const insert = await pool.request()
+            .input('name', name || email)
+            .input('email', email)
+            .query(`INSERT INTO tenderEmployee (Name, Email, Status) OUTPUT INSERTED.UserID, INSERTED.Name, INSERTED.Email, INSERTED.Status VALUES (@name, @email, 1)`)
+          const user = insert.recordset[0]
+          const token = generateToken(user)
+          console.log('🔐 Token generated (auto-provisioned):', token ? token.substring(0, 60) + '...' : 'EMPTY')
+          return res.json({
+            success: true,
+            message: 'Login successful (auto-provisioned)',
+            user: { id: user.UserID, name: user.Name, email: user.Email },
+            token
+          })
+        } catch (e) {
+          console.error('Auto-provision failed:', e)
+          return res.status(401).json({
+            error: 'Access denied',
+            message: 'Your email is not authorized to access this platform. Please contact info@adco.ie for access.'
+          })
+        }
+      }
       return res.status(401).json({
         error: 'Access denied',
         message: 'Your email is not authorized to access this platform. Please contact info@adco.ie for access.'
-      });
+      })
     }
 
     // Check if user is active (Status = 1)
@@ -49,6 +74,7 @@ const microsoftLogin = async (req, res) => {
 
     // Generate JWT token
     const token = generateToken(user);
+    console.log('🔐 Token generated:', token ? token.substring(0, 60) + '...' : 'EMPTY')
 
     res.json({
       success: true,
