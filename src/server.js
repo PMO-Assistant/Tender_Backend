@@ -23,6 +23,7 @@ app.use(helmet({
 const allowedOrigins = [
   'http://localhost:3000',
   'https://localhost:3000',
+  'https://tender-frontend-git-main-adco-contractings-projects.vercel.app',
   process.env.FRONTEND_URL,
   process.env.NEXT_PUBLIC_FRONTEND_URL
 ].filter(Boolean); // Remove undefined values
