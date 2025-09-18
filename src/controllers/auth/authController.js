@@ -17,6 +17,20 @@ const microsoftLogin = async (req, res) => {
 
     const { email, name, accessToken } = req.body;
 
+    console.log('🔐 Backend Microsoft login request:', {
+      email: email ? email.substring(0, 3) + '***' : 'Missing',
+      name: name ? name.substring(0, 3) + '***' : 'Missing',
+      tokenLength: accessToken ? accessToken.length : 0
+    });
+
+    // If accessToken looks like an auth code, reject and require popup flow
+    if (accessToken && accessToken.length < 200 && /\./.test(accessToken) === false) {
+      return res.status(400).json({
+        error: 'Invalid token type',
+        message: 'Authorization code received. Use MSAL popup/redirect to exchange in browser and send access token to backend.'
+      })
+    }
+
     // Get database connection
     const pool = await getConnectedPool();
     
@@ -143,6 +157,57 @@ const getCurrentUser = async (req, res) => {
   }
 };
 
+// Get current user permissions endpoint
+const getCurrentUserPermissions = async (req, res) => {
+  try {
+    const pool = await getConnectedPool();
+    const result = await pool.request()
+      .input('userId', req.user.UserID)
+      .query(`
+        SELECT 
+          a.AccessID,
+          a.UserID,
+          a.Contact,
+          a.Company,
+          a.AI,
+          a.[File],
+          a.Task,
+          a.[Admin]
+        FROM tenderAccess a
+        WHERE a.UserID = @userId
+      `);
+    
+    if (result.recordset.length === 0) {
+      return res.status(404).json({
+        error: 'Permissions not found',
+        message: 'User permissions not configured'
+      });
+    }
+
+    const permissions = result.recordset[0];
+    res.json({
+      success: true,
+      permissions: {
+        AccessID: permissions.AccessID,
+        UserID: permissions.UserID,
+        Contact: permissions.Contact || false,
+        Company: permissions.Company || false,
+        AI: permissions.AI || false,
+        File: permissions.File || false,
+        Task: permissions.Task || false,
+        Admin: permissions.Admin || false
+      }
+    });
+
+  } catch (error) {
+    console.error('Get current user permissions error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'An error occurred while fetching user permissions'
+    });
+  }
+};
+
 // Validation middleware for Microsoft login
 const validateMicrosoftLogin = [
   body('email')
@@ -161,5 +226,6 @@ module.exports = {
   microsoftLogin,
   verifyToken,
   getCurrentUser,
+  getCurrentUserPermissions,
   validateMicrosoftLogin
 }; 

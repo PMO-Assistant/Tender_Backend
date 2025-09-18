@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { microsoftLogin, verifyToken, getCurrentUser, validateMicrosoftLogin } = require('../controllers/auth/authController');
+const { microsoftLogin, verifyToken, getCurrentUser, getCurrentUserPermissions, validateMicrosoftLogin } = require('../controllers/auth/authController');
 const { authenticateToken, loginLimiter } = require('../middleware/auth');
 
 // Microsoft login route with rate limiting
@@ -11,6 +11,9 @@ router.get('/verify', authenticateToken, verifyToken);
 
 // Get current user route
 router.get('/me', authenticateToken, getCurrentUser);
+
+// Get current user permissions route
+router.get('/me/permissions', authenticateToken, getCurrentUserPermissions);
 
 // Logout route (client-side token removal)
 router.post('/logout', authenticateToken, (req, res) => {

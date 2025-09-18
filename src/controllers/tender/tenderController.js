@@ -6,20 +6,18 @@ const tenderController = {
         try {
             const pool = await getConnectedPool();
             
-            // Get the highest tender number and add 1
+            // Get the highest TenderID and add 1
             const maxResult = await pool.request().query(`
-                SELECT ISNULL(MAX(CAST(SUBSTRING(tenderNo, 9, LEN(tenderNo)) AS INT)), 0) + 1 AS nextNumber 
+                SELECT ISNULL(MAX(TenderID), 0) + 1 AS nextNumber 
                 FROM tenderTender 
-                WHERE tenderNo LIKE 'TND-%' AND ISNUMERIC(SUBSTRING(tenderNo, 9, LEN(tenderNo))) = 1
+                WHERE IsDeleted = 0 OR IsDeleted IS NULL
             `);
             
             const nextNumber = maxResult.recordset[0]?.nextNumber || 1;
-            const year = new Date().getFullYear();
-            const nextTenderNo = `TND-${year}-${nextNumber.toString().padStart(3, '0')}`;
             
             res.json({ 
                 nextTenderId: nextNumber,
-                nextTenderNo: nextTenderNo
+                nextTenderNo: nextNumber.toString()
             });
         } catch (err) {
             console.error('Error getting next tender number:', err);
