@@ -111,43 +111,54 @@ const orgChartController = {
                     return;
                 }
                 
-                // Save to history first
-                await pool.request()
-                    .input('OrgChartID', existing.OrgChartID)
-                    .input('TenderID', tenderId)
-                    .input('AddBy', addBy)
-                    .input('Version', existing.Version)
-                    .input('Content', content)
-                    .input('ChangeReason', changeReason || 'Updated org chart')
-                    .query(`
-                        INSERT INTO tenderOrgChartHistory (
-                            OrgChartID, TenderID, AddBy, Version, Content, ChangeReason
-                        )
-                        VALUES (
-                            @OrgChartID, @TenderID, @AddBy, @Version, @Content, @ChangeReason
-                        )
-                    `);
+                // Use a single transaction to update both history and main record
+                const transaction = pool.transaction();
+                await transaction.begin();
+                
+                try {
+                    // Save to history first
+                    await transaction.request()
+                        .input('OrgChartID', existing.OrgChartID)
+                        .input('TenderID', tenderId)
+                        .input('AddBy', addBy)
+                        .input('Version', existing.Version)
+                        .input('Content', content)
+                        .input('ChangeReason', changeReason || 'Updated org chart')
+                        .query(`
+                            INSERT INTO tenderOrgChartHistory (
+                                OrgChartID, TenderID, AddBy, Version, Content, ChangeReason
+                            )
+                            VALUES (
+                                @OrgChartID, @TenderID, @AddBy, @Version, @Content, @ChangeReason
+                            )
+                        `);
 
-                // Update the main record
-                await pool.request()
-                    .input('OrgChartID', existing.OrgChartID)
-                    .input('Content', content)
-                    .input('ChangeReason', changeReason || 'Updated org chart')
-                    .input('AddBy', addBy)
-                    .query(`
-                        UPDATE tenderOrgChart
-                        SET Content = @Content,
-                            ChangeReason = @ChangeReason,
-                            UpdatedAt = GETDATE(),
-                            Version = Version + 1
-                        WHERE OrgChartID = @OrgChartID
-                    `);
+                    // Update the main record
+                    await transaction.request()
+                        .input('OrgChartID', existing.OrgChartID)
+                        .input('Content', content)
+                        .input('ChangeReason', changeReason || 'Updated org chart')
+                        .input('AddBy', addBy)
+                        .query(`
+                            UPDATE tenderOrgChart
+                            SET Content = @Content,
+                                ChangeReason = @ChangeReason,
+                                UpdatedAt = GETDATE(),
+                                Version = Version + 1
+                            WHERE OrgChartID = @OrgChartID
+                        `);
 
-                res.json({ 
-                    message: 'Org chart updated successfully',
-                    orgChartId: existing.OrgChartID,
-                    version: existing.Version + 1
-                });
+                    await transaction.commit();
+
+                    res.json({ 
+                        message: 'Org chart updated successfully',
+                        orgChartId: existing.OrgChartID,
+                        version: existing.Version + 1
+                    });
+                } catch (transactionError) {
+                    await transaction.rollback();
+                    throw transactionError;
+                }
             } else {
                 // Create new org chart
                 const result = await pool.request()

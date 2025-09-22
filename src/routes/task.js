@@ -29,6 +29,12 @@ router.get('/available-users', taskController.getAvailableUsers);
 // Get available tenders for task creation (must come before /:taskId)
 router.get('/tenders/available', taskController.getAvailableTenders);
 
+// Get available watchlist projects for task creation (must come before /:taskId)
+router.get('/watchlist/available', taskController.getAvailableWatchlistProjects);
+
+// Get tasks by watchlist ID (must come before /:taskId)
+router.get('/watchlist/:watchlistId', taskController.getTasksByWatchlistId);
+
 // Get task by ID
 router.get('/:taskId', taskController.getTaskById);
 

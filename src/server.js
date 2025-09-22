@@ -282,6 +282,15 @@ try {
   console.error('❌ Error stack:', error.stack);
 }
 
+try {
+  console.log('🔄 Loading Watchlist routes...');
+  const watchlistRoutes = require('./routes/watchlist');
+  app.use('/api/watchlist', watchlistRoutes);
+  console.log('✅ Watchlist routes loaded');
+} catch (error) {
+  console.error('❌ Error loading Watchlist routes:', error.message);
+}
+
 
 const PORT = process.env.PORT || 3001;
 

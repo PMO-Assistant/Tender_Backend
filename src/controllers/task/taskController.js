@@ -615,6 +615,7 @@ const taskController = {
             t.DueDate,
             t.Priority,
             t.Tender,
+            t.WhatchlistID,
             -- Status field (default to 'todo' if not set)
             COALESCE(t.Status, 'todo') as Status,
             -- Creator info
@@ -623,12 +624,14 @@ const taskController = {
             -- Completed by info
             completedBy.Name as CompletedByName,
             completedBy.Email as CompletedByEmail,
-            -- Tender info
-            tender.ProjectName as TenderName
+            -- Project info (tender or watchlist)
+            tender.ProjectName as TenderName,
+            watchlist.ProjectName as WatchlistName
           FROM tenderTask t
           LEFT JOIN tenderEmployee creator ON t.AddBy = creator.UserID
           LEFT JOIN tenderEmployee completedBy ON t.CompletedBy = completedBy.UserID
           LEFT JOIN tenderTender tender ON t.Tender = tender.TenderID
+          LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
           WHERE t.AddBy = @UserID 
              OR t.TaskID IN (
                SELECT TaskID FROM tenderTaskAssignee WHERE UserID = @UserID
@@ -648,12 +651,14 @@ const taskController = {
         DueDate: row.DueDate,
         Priority: row.Priority,
         Tender: row.Tender,
+        WhatchlistID: row.WhatchlistID,
         Status: row.Status,
         CreatorName: row.CreatorName,
         CreatorEmail: row.CreatorEmail,
         CompletedByName: row.CompletedByName,
         CompletedByEmail: row.CompletedByEmail,
-        TenderName: row.TenderName || null
+        TenderName: row.TenderName || null,
+        WatchlistName: row.WatchlistName || null
       }));
 
       res.json({ tasks });
@@ -709,6 +714,7 @@ const taskController = {
             t.DueDate,
             t.Priority,
             t.Tender,
+            t.WhatchlistID,
             -- Status field (default to 'todo' if not set)
             COALESCE(t.Status, 'todo') as Status,
             -- Creator info
@@ -718,11 +724,13 @@ const taskController = {
             completedBy.Name as CompletedByName,
             completedBy.Email as CompletedByEmail,
             -- Tender info
-            tender.ProjectName as TenderName
+            tender.ProjectName as TenderName,
+            watchlist.ProjectName as WatchlistName
           FROM tenderTask t
           LEFT JOIN tenderEmployee creator ON t.AddBy = creator.UserID
           LEFT JOIN tenderEmployee completedBy ON t.CompletedBy = completedBy.UserID
           LEFT JOIN tenderTender tender ON t.Tender = tender.TenderID
+          LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
           WHERE t.Tender = @TenderID
           ORDER BY t.CreatedAt DESC
         `);
@@ -741,12 +749,14 @@ const taskController = {
         DueDate: row.DueDate,
         Priority: row.Priority,
         Tender: row.Tender,
+        WhatchlistID: row.WhatchlistID,
         Status: row.Status,
         CreatorName: row.CreatorName,
         CreatorEmail: row.CreatorEmail,
         CompletedByName: row.CompletedByName,
         CompletedByEmail: row.CompletedByEmail,
-        TenderName: row.TenderName || null
+        TenderName: row.TenderName || null,
+        WatchlistName: row.WatchlistName || null
       }));
 
       console.log('Returning tasks:', tasks.length);
@@ -783,6 +793,7 @@ const taskController = {
             t.DueDate,
             t.Priority,
             t.Tender,
+            t.WhatchlistID,
             -- Status field (default to 'todo' if not set)
             COALESCE(t.Status, 'todo') as Status,
             -- Creator info
@@ -792,11 +803,13 @@ const taskController = {
             completedBy.Name as CompletedByName,
             completedBy.Email as CompletedByEmail,
             -- Tender info
-            tender.ProjectName as TenderName
+            tender.ProjectName as TenderName,
+            watchlist.ProjectName as WatchlistName
           FROM tenderTask t
           LEFT JOIN tenderEmployee creator ON t.AddBy = creator.UserID
           LEFT JOIN tenderEmployee completedBy ON t.CompletedBy = completedBy.UserID
           LEFT JOIN tenderTender tender ON t.Tender = tender.TenderID
+          LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
           WHERE t.TaskID = @TaskID
             AND t.AddBy = @UserID
         `);
@@ -809,6 +822,14 @@ const taskController = {
       }
 
       const task = result.recordset[0];
+      console.log('=== BACKEND TASK DEBUG ===');
+      console.log('Raw task data:', task);
+      console.log('Tender:', task.Tender);
+      console.log('WhatchlistID:', task.WhatchlistID);
+      console.log('TenderName:', task.TenderName);
+      console.log('WatchlistName:', task.WatchlistName);
+      console.log('=== END BACKEND DEBUG ===');
+      
       res.json({
         task: {
           TaskID: task.TaskID,
@@ -822,12 +843,14 @@ const taskController = {
           DueDate: task.DueDate,
           Priority: task.Priority,
           Tender: task.Tender,
+          WhatchlistID: task.WhatchlistID,
           Status: task.Status,
           CreatorName: task.CreatorName,
           CreatorEmail: task.CreatorEmail,
           CompletedByName: task.CompletedByName,
           CompletedByEmail: task.CompletedByEmail,
-          TenderName: task.TenderName || null
+          TenderName: task.TenderName || null,
+          WatchlistName: task.WatchlistName || null
         }
       });
     } catch (error) {
@@ -847,7 +870,8 @@ const taskController = {
         StartDate,
         DueDate,
         Priority,
-        Tender
+        Tender,
+        WhatchlistID
       } = req.body;
 
       // Validate required fields
@@ -855,6 +879,21 @@ const taskController = {
         return res.status(400).json({
           error: 'Validation failed',
           message: 'Description is required'
+        });
+      }
+
+      // Validate that task is assigned to either tender or watchlist (not both)
+      if (Tender && WhatchlistID) {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'Task cannot be assigned to both tender and watchlist project'
+        });
+      }
+
+      if (!Tender && !WhatchlistID) {
+        return res.status(400).json({
+          error: 'Validation failed',
+          message: 'Task must be assigned to either a tender or watchlist project'
         });
       }
 
@@ -875,6 +914,20 @@ const taskController = {
         }
       }
 
+      // Check if watchlist project exists (only if provided)
+      if (WhatchlistID) {
+        const watchlistCheck = await pool.request()
+          .input('WhatchlistID', WhatchlistID)
+          .query('SELECT WhatchlistID FROM tenderWhatchlist WHERE WhatchlistID = @WhatchlistID');
+
+        if (watchlistCheck.recordset.length === 0) {
+          return res.status(400).json({
+            error: 'Invalid watchlist project',
+            message: 'The specified watchlist project does not exist'
+          });
+        }
+      }
+
       // Insert new task without assignees
       const result = await pool.request()
         .input('AddBy', userId)
@@ -883,11 +936,12 @@ const taskController = {
         .input('DueDate', DueDate || null)
         .input('Priority', Priority || 'Medium')
         .input('Tender', Tender || null)
+        .input('WhatchlistID', WhatchlistID || null)
         .input('Status', 'todo')
         .query(`
-          INSERT INTO tenderTask (AddBy, Description, StartDate, DueDate, Priority, Tender, Status)
+          INSERT INTO tenderTask (AddBy, Description, StartDate, DueDate, Priority, Tender, WhatchlistID, Status)
           OUTPUT INSERTED.TaskID
-          VALUES (@AddBy, @Description, @StartDate, @DueDate, @Priority, @Tender, @Status)
+          VALUES (@AddBy, @Description, @StartDate, @DueDate, @Priority, @Tender, @WhatchlistID, @Status)
         `);
 
       const taskId = result.recordset[0].TaskID;
@@ -915,10 +969,10 @@ const taskController = {
           .query('SELECT Name FROM tenderEmployee WHERE UserID = @UserID');
         
         const creatorName = creatorResult.recordset[0]?.Name || 'Someone';
-        const tenderName = Tender ? ` for tender ${Tender}` : '';
+        const projectName = Tender ? ` for tender ${Tender}` : (WhatchlistID ? ` for watchlist project ${WhatchlistID}` : '');
         
         // Create notification text
-        const notificationText = `Task "${Description}" created${tenderName}`;
+        const notificationText = `Task "${Description}" created${projectName}`;
         
         // Send notification to creator
         await sendTaskNotification(pool, taskId, userId, notificationText, 'task_created', `/tasks/${taskId}`);
@@ -938,7 +992,7 @@ const taskController = {
           projectName: 'No project'
         };
 
-        // Get tender info if available
+        // Get project info if available
         if (Tender) {
           const tenderResult = await pool.request()
             .input('TenderID', Tender)
@@ -946,6 +1000,14 @@ const taskController = {
           
           if (tenderResult.recordset.length > 0) {
             taskData.projectName = tenderResult.recordset[0].ProjectName;
+          }
+        } else if (WhatchlistID) {
+          const watchlistResult = await pool.request()
+            .input('WhatchlistID', WhatchlistID)
+            .query('SELECT ProjectName FROM tenderWhatchlist WHERE WhatchlistID = @WhatchlistID');
+          
+          if (watchlistResult.recordset.length > 0) {
+            taskData.projectName = watchlistResult.recordset[0].ProjectName;
           }
         }
 
@@ -978,7 +1040,8 @@ const taskController = {
         StartDate,
         DueDate,
         Priority,
-        Tender
+        Tender,
+        WhatchlistID
       } = req.body;
 
       const pool = await getConnectedPool();
@@ -1003,24 +1066,45 @@ const taskController = {
         });
       }
 
-      // Update task basic info
-      await pool.request()
-        .input('TaskID', taskId)
-        .input('Description', Description)
-        .input('StartDate', StartDate || null)
-        .input('DueDate', DueDate || null)
-        .input('Priority', Priority)
-        .input('Tender', Tender || null)
-        .query(`
+      // Build dynamic UPDATE query based on provided fields
+      const updateFields = []
+      const request = pool.request().input('TaskID', taskId)
+
+      if (Description !== undefined) {
+        updateFields.push('Description = @Description')
+        request.input('Description', Description)
+      }
+      if (StartDate !== undefined) {
+        updateFields.push('StartDate = @StartDate')
+        request.input('StartDate', StartDate)
+      }
+      if (DueDate !== undefined) {
+        updateFields.push('DueDate = @DueDate')
+        request.input('DueDate', DueDate)
+      }
+      if (Priority !== undefined) {
+        updateFields.push('Priority = @Priority')
+        request.input('Priority', Priority)
+      }
+      if (Tender !== undefined) {
+        updateFields.push('Tender = @Tender')
+        request.input('Tender', Tender)
+      }
+      if (WhatchlistID !== undefined) {
+        updateFields.push('WhatchlistID = @WhatchlistID')
+        request.input('WhatchlistID', WhatchlistID)
+      }
+
+      // Always update UpdatedAt
+      updateFields.push('UpdatedAt = SYSDATETIME()')
+
+      if (updateFields.length > 1) { // More than just UpdatedAt
+        await request.query(`
           UPDATE tenderTask 
-          SET Description = @Description,
-              StartDate = @StartDate,
-              DueDate = @DueDate,
-              Priority = @Priority,
-              Tender = @Tender,
-              UpdatedAt = SYSDATETIME()
+          SET ${updateFields.join(', ')}
           WHERE TaskID = @TaskID
-        `);
+        `)
+      }
 
       // Add timeline entry for task update
       try {
@@ -1046,18 +1130,23 @@ const taskController = {
         
         const updaterName = updaterResult.recordset[0]?.Name || 'Someone';
         
-        // Get tender name if assigned to a tender
-        let tenderName = '';
+        // Get project name if assigned to a project
+        let projectName = '';
         if (Tender) {
           const tenderResult = await pool.request()
             .input('TenderID', Tender)
             .query('SELECT ProjectName FROM tenderTender WHERE TenderID = @TenderID');
-          tenderName = tenderResult.recordset[0]?.ProjectName || '';
+          projectName = tenderResult.recordset[0]?.ProjectName || '';
+        } else if (WhatchlistID) {
+          const watchlistResult = await pool.request()
+            .input('WhatchlistID', WhatchlistID)
+            .query('SELECT ProjectName FROM tenderWhatchlist WHERE WhatchlistID = @WhatchlistID');
+          projectName = watchlistResult.recordset[0]?.ProjectName || '';
         }
 
         // Create notification text
-        const notificationText = tenderName 
-          ? `{userName} updated task "${Description}" for ${tenderName}`
+        const notificationText = projectName 
+          ? `{userName} updated task "${Description}" for ${projectName}`
           : `{userName} updated task "${Description}"`;
 
         // Send notifications to task creator and assignees
@@ -1131,6 +1220,7 @@ const taskController = {
         await pool.request()
           .input('TaskID', taskId)
           .input('CompletedBy', userId)
+          .input('Status', status)
           .query(`
             UPDATE tenderTask 
             SET CompletedAt = SYSDATETIME(),
@@ -1236,6 +1326,7 @@ const taskController = {
                    tender.ProjectName
             FROM tenderTask t
             LEFT JOIN tenderTender tender ON t.Tender = tender.TenderID
+          LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
             WHERE t.TaskID = @TaskID
           `);
         
@@ -1397,6 +1488,7 @@ const taskController = {
                    tender.ProjectName
             FROM tenderTask t
             LEFT JOIN tenderTender tender ON t.Tender = tender.TenderID
+          LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
             WHERE t.TaskID = @TaskID
           `);
         
@@ -1671,6 +1763,7 @@ const taskController = {
                    tender.ProjectName
             FROM tenderTask t
             LEFT JOIN tenderTender tender ON t.Tender = tender.TenderID
+          LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
             WHERE t.TaskID = @TaskID
           `);
         
@@ -1869,6 +1962,119 @@ const taskController = {
       res.status(500).json({
         error: 'Internal server error',
         message: 'Failed to fetch available tenders'
+      });
+    }
+  },
+
+  // Get available watchlist projects for task creation
+  getAvailableWatchlistProjects: async (req, res) => {
+    try {
+      const pool = await getConnectedPool();
+      
+      const result = await pool.request()
+        .query(`
+          SELECT 
+            WhatchlistID,
+            ProjectName,
+            Status,
+            Type,
+            OpenDate
+          FROM tenderWhatchlist
+          ORDER BY CreatedAt DESC
+        `);
+
+      const watchlistProjects = result.recordset.map(row => ({
+        WhatchlistID: row.WhatchlistID,
+        ProjectName: row.ProjectName,
+        Status: row.Status,
+        Type: row.Type,
+        OpenDate: row.OpenDate
+      }));
+
+      res.json({ watchlistProjects });
+    } catch (error) {
+      console.error('Error fetching available watchlist projects:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        message: 'Failed to fetch available watchlist projects'
+      });
+    }
+  },
+
+  getTasksByWatchlistId: async (req, res) => {
+    try {
+      const { watchlistId } = req.params;
+      const pool = await getConnectedPool();
+      const userId = req.user.UserID;
+
+      // Get tasks assigned to the specific watchlist project
+      const result = await pool.request()
+        .input('WhatchlistID', watchlistId)
+        .input('UserID', userId)
+        .query(`
+          SELECT 
+            t.TaskID,
+            t.AddBy,
+            t.CreatedAt,
+            t.UpdatedAt,
+            t.CompletedAt,
+            t.CompletedBy,
+            t.Description,
+            t.StartDate,
+            t.DueDate,
+            t.Priority,
+            t.WhatchlistID,
+            t.Status,
+            e.Name as CreatorName,
+            e.Email as CreatorEmail,
+            completed.Name as CompletedByName,
+            completed.Email as CompletedByEmail,
+            watchlist.ProjectName as WatchlistName
+          FROM tenderTask t
+          LEFT JOIN tenderEmployee e ON t.AddBy = e.UserID
+          LEFT JOIN tenderEmployee completed ON t.CompletedBy = completed.UserID
+          LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
+          WHERE t.WhatchlistID = @WhatchlistID
+            AND (t.AddBy = @UserID OR t.TaskID IN (
+              SELECT TaskID FROM tenderTaskAssignee WHERE UserID = @UserID
+            ))
+          ORDER BY t.CreatedAt DESC
+        `);
+
+      console.log('Backend: Raw task data:', result.recordset);
+      console.log('Backend: First task Description:', result.recordset[0]?.Description);
+
+      const tasks = result.recordset.map(task => ({
+        TaskID: task.TaskID,
+        AddBy: task.AddBy,
+        CreatedAt: task.CreatedAt,
+        UpdatedAt: task.UpdatedAt,
+        CompletedAt: task.CompletedAt,
+        CompletedBy: task.CompletedBy,
+        Description: task.Description,
+        StartDate: task.StartDate,
+        DueDate: task.DueDate,
+        Priority: task.Priority,
+        WhatchlistID: task.WhatchlistID,
+        Status: task.Status,
+        CreatorName: task.CreatorName,
+        CreatorEmail: task.CreatorEmail,
+        CompletedByName: task.CompletedByName,
+        CompletedByEmail: task.CompletedByEmail,
+        WatchlistName: task.WatchlistName
+      }));
+
+      res.json({
+        success: true,
+        tasks: tasks
+      });
+
+    } catch (error) {
+      console.error('Error fetching tasks by watchlist ID:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch tasks for watchlist',
+        message: 'Failed to fetch tasks for watchlist project'
       });
     }
   }

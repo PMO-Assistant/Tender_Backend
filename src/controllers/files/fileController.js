@@ -733,9 +733,18 @@ ORDER BY f.CreatedAt DESC;
             }
 
             // Validate required fields after fallback
-            if (!folderId || !docId || !connectionTable) {
+            // Only require docId and connectionTable if we're in a specific context (tender/RFI)
+            // For general uploads, these can be null
+            if (!folderId) {
                 return res.status(400).json({ 
-                    message: 'Missing required fields: folderId, docId, connectionTable' 
+                    message: 'Missing required field: folderId' 
+                });
+            }
+            
+            // If we have a tenderId or rfiId, we should have docId and connectionTable
+            if ((tenderId || rfiId) && (!docId || !connectionTable)) {
+                return res.status(400).json({ 
+                    message: 'Missing required fields: docId, connectionTable (required for tender/RFI uploads)' 
                 });
             }
 
@@ -765,8 +774,8 @@ ORDER BY f.CreatedAt DESC;
                 .input('Size', parseInt(size)) // Ensure size is an integer
                 .input('ContentType', mimetype)
                 .input('Status', 1) // Changed from 'Active' to 1 for bit column
-                .input('DocID', parseInt(docId)) // Ensure docId is an integer
-                .input('ConnectionTable', connectionTable)
+                .input('DocID', docId ? parseInt(docId) : null) // Handle null docId for general uploads
+                .input('ConnectionTable', connectionTable || null) // Handle null connectionTable for general uploads
                 .input('Metadata', JSON.stringify(metadata))
                 .input('ExtractedText', metadata?.extractedText || null)
                 .query(`

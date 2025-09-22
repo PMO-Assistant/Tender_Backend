@@ -25,37 +25,45 @@ class MistralService {
             // Create metadata prompt with text content
             let prompt = this.createMetadataPrompt(fileName, contentType);
             
+            // Only call AI if we have actual text content to analyze
             if (extractedText && extractedText.length > 0) {
                 // Limit text content to avoid token limits while keeping it searchable
                 const truncatedText = extractedText.substring(0, 6000); // Reduced for more focused extraction
                 prompt += `\n\nFile Content:\n${truncatedText}`;
-            }
-
-            const response = await axios.post(`${this.baseUrl}/chat/completions`, {
-                model: 'mistral-large-latest',
-                messages: [
-                    {
-                        role: 'user',
-                        content: `${prompt}\n\nReturn ONLY a single JSON object. Do not include markdown, code fences, or any commentary.`
+                
+                const response = await axios.post(`${this.baseUrl}/chat/completions`, {
+                    model: 'mistral-large-latest',
+                    messages: [
+                        {
+                            role: 'user',
+                            content: `${prompt}\n\nReturn ONLY a single JSON object. Do not include markdown, code fences, or any commentary.`
+                        }
+                    ],
+                    max_tokens: 1000, // Reduced for more concise responses
+                    temperature: 0.1
+                }, {
+                    headers: {
+                        'Authorization': `Bearer ${this.apiKey}`,
+                        'Content-Type': 'application/json'
                     }
-                ],
-                max_tokens: 1000, // Reduced for more concise responses
-                temperature: 0.1
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${this.apiKey}`,
-                    'Content-Type': 'application/json'
-                }
-            });
+                });
 
-            const extractedMetadata = response.data.choices[0].message.content;
-            
-            // Parse the response and structure it with text content
-            const metadata = this.parseMetadataResponse(extractedMetadata, fileName, contentType);
-            metadata.extractedText = extractedText; // Include full text for search
-            metadata.textLength = extractedText ? extractedText.length : 0;
-            
-            return metadata;
+                const extractedMetadata = response.data.choices[0].message.content;
+                
+                // Parse the response and structure it with text content
+                const metadata = this.parseMetadataResponse(extractedMetadata, fileName, contentType);
+                metadata.extractedText = extractedText; // Include full text for search
+                metadata.textLength = extractedText ? extractedText.length : 0;
+                
+                return metadata;
+            } else {
+                // No text content - return fallback metadata without AI hallucination
+                console.log('No text content found, using fallback metadata for:', fileName);
+                const fallback = this.createFallbackMetadata(fileName, contentType);
+                fallback.extractedText = extractedText;
+                fallback.textLength = extractedText ? extractedText.length : 0;
+                return fallback;
+            }
             
         } catch (error) {
             console.error('Error extracting metadata with Mistral:', error);
@@ -285,11 +293,11 @@ Be concise and specific. Avoid generic terms.`;
     inferDocumentType(fileName, contentType) {
         const ext = fileName.split('.').pop()?.toLowerCase();
         
+        if (contentType.includes('image')) return 'Image';
         if (contentType.includes('pdf')) return 'PDF Document';
         if (contentType.includes('word')) return 'Word Document';
         if (contentType.includes('excel') || ext === 'xlsx' || ext === 'xls') return 'Spreadsheet';
         if (contentType.includes('powerpoint') || ext === 'pptx' || ext === 'ppt') return 'Presentation';
-        if (contentType.includes('image')) return 'Image';
         if (ext === 'dwg' || ext === 'dxf') return 'CAD Drawing';
         if (ext === 'zip' || ext === 'rar') return 'Archive';
         
@@ -357,10 +365,12 @@ Be concise and specific. Avoid generic terms.`;
     }
 
     createFallbackMetadata(fileName, contentType) {
+        const isImage = contentType.includes('image');
+        
         return {
             title: this.generateTitleFromFileName(fileName),
-            summary: `File: ${fileName}`,
-            keywords: [],
+            summary: isImage ? `Image file: ${fileName}` : `File: ${fileName}`,
+            keywords: isImage ? ['image', 'photo', 'picture'] : [],
             documentType: this.inferDocumentType(fileName, contentType),
             category: this.inferCategory(fileName, contentType),
             parties: [],
