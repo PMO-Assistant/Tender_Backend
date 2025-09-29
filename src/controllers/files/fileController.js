@@ -2,7 +2,7 @@ const { getConnectedPool } = require('../../config/database');
 const { uploadFile, downloadFile, deleteFile } = require('../../config/azureBlobService');
 const multer = require('multer');
 const path = require('path');
-const mistralService = require('../../services/mistralService');
+const openAIService = require('../../config/openAIService');
 
 // Configure multer for memory storage
 const upload = multer({
@@ -329,6 +329,194 @@ const fileController = {
         }
     },
 
+    // Create subfolder in tender folder
+    createSubfolder: async (req, res) => {
+        try {
+            const { parentFolderId } = req.params;
+            const { folderName } = req.body;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!folderName || folderName.trim() === '') {
+                return res.status(400).json({ message: 'Folder name is required' });
+            }
+
+            // Validate parent folder exists and is a tender folder
+            const parentFolderResult = await pool.request()
+                .input('ParentFolderID', parentFolderId)
+                .query(`
+                    SELECT FolderID, FolderName, FolderPath, FolderType, DocID, ConnectionTable
+                    FROM tenderFolder 
+                    WHERE FolderID = @ParentFolderID AND IsActive = 1
+                `);
+
+            if (parentFolderResult.recordset.length === 0) {
+                return res.status(404).json({ message: 'Parent folder not found' });
+            }
+
+            const parentFolder = parentFolderResult.recordset[0];
+            
+            // Check if parent is a tender folder (should have DocID and ConnectionTable)
+            if (!parentFolder.DocID || !parentFolder.ConnectionTable) {
+                return res.status(400).json({ message: 'Can only create subfolders in tender folders' });
+            }
+
+            // Check if subfolder with same name already exists
+            const existingFolderResult = await pool.request()
+                .input('ParentFolderID', parentFolderId)
+                .input('FolderName', folderName.trim())
+                .query(`
+                    SELECT FolderID 
+                    FROM tenderFolder 
+                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName AND IsActive = 1
+                `);
+
+            if (existingFolderResult.recordset.length > 0) {
+                return res.status(409).json({ message: 'A folder with this name already exists' });
+            }
+
+            // Construct the new folder path
+            const newFolderPath = `${parentFolder.FolderPath}/${folderName.trim()}`;
+
+            // Create the subfolder
+            const insertResult = await pool.request()
+                .input('FolderName', folderName.trim())
+                .input('FolderPath', newFolderPath)
+                .input('FolderType', 'sub')
+                .input('ParentFolderID', parentFolderId)
+                .input('AddBy', userId)
+                .input('DocID', parentFolder.DocID)
+                .input('ConnectionTable', parentFolder.ConnectionTable)
+                .query(`
+                    INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                    OUTPUT INSERTED.FolderID, INSERTED.FolderPath, INSERTED.FolderName
+                    VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                `);
+
+            const newFolder = insertResult.recordset[0];
+            
+            res.status(201).json({
+                message: 'Subfolder created successfully',
+                folder: {
+                    id: newFolder.FolderID,
+                    name: newFolder.FolderName,
+                    path: newFolder.FolderPath,
+                    parentId: parentFolderId,
+                    docId: parentFolder.DocID,
+                    connectionTable: parentFolder.ConnectionTable
+                }
+            });
+
+        } catch (error) {
+            console.error('Error creating subfolder:', error);
+            res.status(500).json({ message: 'Failed to create subfolder' });
+        }
+    },
+
+    // Delete folder (only user-created folders, not if files exist inside)
+    deleteFolder: async (req, res) => {
+        try {
+            const { folderId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            // First, get folder details to check if it can be deleted
+            const folderResult = await pool.request()
+                .input('FolderID', folderId)
+                .query(`
+                    SELECT FolderID, FolderName, FolderPath, FolderType, AddBy, DocID, ConnectionTable
+                    FROM tenderFolder 
+                    WHERE FolderID = @FolderID AND IsActive = 1
+                `);
+
+            if (folderResult.recordset.length === 0) {
+                return res.status(404).json({ message: 'Folder not found' });
+            }
+
+            const folder = folderResult.recordset[0];
+
+            // Check if user owns this folder (only creator can delete)
+            if (folder.AddBy !== userId) {
+                return res.status(403).json({ message: 'You can only delete folders you created' });
+            }
+
+            // Check if this is a system folder (has DocID and ConnectionTable - these are tender/task folders)
+            // Only allow deletion of user-created subfolders (those without DocID/ConnectionTable or with different structure)
+            if (folder.DocID && folder.ConnectionTable) {
+                // This is a system-generated folder (tender/task folder), check if it's a subfolder
+                // Allow deletion only if it's a subfolder within a tender/task folder
+                const parentResult = await pool.request()
+                    .input('FolderID', folderId)
+                    .query(`
+                        SELECT ParentFolderID FROM tenderFolder WHERE FolderID = @FolderID
+                    `);
+                
+                if (parentResult.recordset.length === 0) {
+                    return res.status(400).json({ message: 'Cannot delete system folders' });
+                }
+            }
+
+            // Check if this is a protected system subfolder (BOQ, General, RFI, SAQ)
+            const protectedFolderNames = ['BOQ', 'General', 'RFI', 'SAQ'];
+            if (protectedFolderNames.includes(folder.FolderName)) {
+                return res.status(400).json({ 
+                    message: `Cannot delete system folder "${folder.FolderName}". This folder is required for tender organization.` 
+                });
+            }
+
+            // Check if folder has any files
+            const filesResult = await pool.request()
+                .input('FolderID', folderId)
+                .query(`
+                    SELECT COUNT(*) as FileCount
+                    FROM tenderFile 
+                    WHERE FolderID = @FolderID AND IsDeleted = 0
+                `);
+
+            const fileCount = filesResult.recordset[0].FileCount;
+            if (fileCount > 0) {
+                return res.status(400).json({ 
+                    message: `Cannot delete folder. It contains ${fileCount} file(s). Please delete all files first.` 
+                });
+            }
+
+            // Check if folder has any subfolders
+            const subfoldersResult = await pool.request()
+                .input('ParentFolderID', folderId)
+                .query(`
+                    SELECT COUNT(*) as SubfolderCount
+                    FROM tenderFolder 
+                    WHERE ParentFolderID = @ParentFolderID AND IsActive = 1
+                `);
+
+            const subfolderCount = subfoldersResult.recordset[0].SubfolderCount;
+            if (subfolderCount > 0) {
+                return res.status(400).json({ 
+                    message: `Cannot delete folder. It contains ${subfolderCount} subfolder(s). Please delete all subfolders first.` 
+                });
+            }
+
+            // Delete the folder (soft delete by setting IsActive = 0)
+            await pool.request()
+                .input('FolderID', folderId)
+                .input('UserID', userId)
+                .query(`
+                    UPDATE tenderFolder 
+                    SET IsActive = 0, UpdatedAt = GETDATE()
+                    WHERE FolderID = @FolderID AND AddBy = @UserID
+                `);
+
+            res.json({
+                message: 'Folder deleted successfully',
+                folderName: folder.FolderName
+            });
+
+        } catch (error) {
+            console.error('Error deleting folder:', error);
+            res.status(500).json({ message: 'Failed to delete folder' });
+        }
+    },
+
     // Get files by document ID and connection table (NEW FUNCTION)
     getFilesByDocument: async (req, res) => {
         try {
@@ -538,8 +726,8 @@ ORDER BY f.CreatedAt DESC;
                 userId
             });
 
-            // Extract metadata using Mistral AI
-            const metadata = await mistralService.extractMetadata(buffer, originalname, mimetype);
+            // Extract metadata using OpenAI
+            const metadata = await openAIService.extractMetadata(buffer, originalname, mimetype);
             
             console.log('Metadata extraction result:', {
                 hasMetadata: !!metadata,
@@ -754,8 +942,8 @@ ORDER BY f.CreatedAt DESC;
 
             console.log('Starting metadata extraction...');
             
-            // Extract metadata using Mistral AI
-            const metadata = await mistralService.extractMetadata(buffer, originalname, mimetype);
+            // Extract metadata using OpenAI
+            const metadata = await openAIService.extractMetadata(buffer, originalname, mimetype);
             
             console.log('Metadata extraction completed:', {
                 hasMetadata: !!metadata,

@@ -179,12 +179,12 @@ try {
 }
 
 try {
-  console.log('🔄 Loading mistral routes...');
-  const mistralRoutes = require('./routes/mistralAI');
-  app.use('/api/ai', authenticateToken, requireAIPermission, mistralRoutes);
-  console.log('✅ Mistral routes loaded');
+  console.log('🔄 Loading OpenAI routes...');
+  const openAIRoutes = require('./routes/openAI');
+  app.use('/api/ai', authenticateToken, requireAIPermission, openAIRoutes);
+  console.log('✅ OpenAI routes loaded');
 } catch (error) {
-  console.error('❌ Error loading mistral routes:', error.message);
+  console.error('❌ Error loading OpenAI routes:', error.message);
 }
 
 try {

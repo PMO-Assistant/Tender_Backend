@@ -12,3 +12,5 @@ router.put('/:id', authenticateToken, watchlistController.updateWatchlistItem);
 router.delete('/:id', authenticateToken, watchlistController.deleteWatchlistItem);
 
 module.exports = router;
+
+

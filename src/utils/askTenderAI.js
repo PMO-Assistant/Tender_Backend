@@ -1,6 +1,6 @@
 const sql = require('mssql');
 const { getConnectedPool } = require('../config/database');
-const mistralService = require('../config/mistralAIService');
+const openAIService = require('../config/openAIService');
 const { buildPrompt } = require('./databaseIntrospection');
 
 /**
@@ -248,7 +248,7 @@ async function askTenderAI(userQuestion, dbContext) {
         console.log('🤖 Sending question to LLM:', userQuestion);
         
         // Step 2: Send to LLM
-        const { generated_query } = await mistralService.query(prompt);
+        const { generated_query } = await openAIService.query(prompt);
         
         console.log('📝 Raw LLM response:', generated_query);
         

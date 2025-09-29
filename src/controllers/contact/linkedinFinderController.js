@@ -1,5 +1,5 @@
 /**
- * LinkedIn Finder via Mistral Conversations + web_search (NO FABRICATION)
+ * LinkedIn Finder via OpenAI + web_search (NO FABRICATION)
  * Endpoints:
  *   POST /contacts/:contactId/linkedin/playground  -> real web_search, verified-only
  *   GET  /contacts/:contactId/linkedin/history     -> history
@@ -12,11 +12,11 @@ const https = require('https');
 const { getConnectedPool } = require('../../config/database');
 
 // ---------------- CONFIG ----------------
-const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
-const CONVERSATIONS_URL = 'https://api.mistral.ai/v1/conversations';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const CONVERSATIONS_URL = 'https://api.openai.com/v1/chat/completions';
 
-// Model per Mistral docs (use a valid model id)
-const MODEL = process.env.MISTRAL_MODEL || 'mistral-small-latest';
+// Model per OpenAI docs
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 min
 const RATE_LIMIT_MS = 60 * 1000;     // 60 sec per contact
@@ -101,14 +101,13 @@ function prioritize(profiles) {
  *  - ignore any model-only text (prevents fabrication)
  */
 async function runWebSearchViaConversations({ name, company }) {
-  console.log(`[MISTRAL] Starting web_search for: ${name} at ${company}`);
-  console.log(`[MISTRAL] Using model: ${MODEL}`);
-  console.log(`[MISTRAL] API Key present: ${!!MISTRAL_API_KEY}`);
+  console.log(`[OPENAI] Starting web_search for: ${name} at ${company}`);
+  console.log(`[OPENAI] Using model: ${MODEL}`);
+  console.log(`[OPENAI] API Key present: ${!!OPENAI_API_KEY}`);
   
   const body = {
     model: MODEL,
-    // Keep the prompt tiny; we’ll build profiles from tool outputs only.
-    inputs: [
+    messages: [
       {
         role: 'user',
         content: [
@@ -123,31 +122,30 @@ async function runWebSearchViaConversations({ name, company }) {
     ],
     tools: [
       { type: 'web_search' }
-      // Optional: you can add a function tool, but we won't rely on it to avoid fabrication.
     ],
-    completion_args: { temperature: 0.0, max_tokens: 800 },
-    stream: true,
-    instructions: ''
+    temperature: 0.0,
+    max_tokens: 800,
+    stream: true
   };
 
   // Retry/backoff on 429/5xx
   let res;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    console.log(`[MISTRAL] Attempt ${attempt}/3: Calling Mistral API...`);
+    console.log(`[OPENAI] Attempt ${attempt}/3: Calling OpenAI API...`);
     try {
       res = await fetch(CONVERSATIONS_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-KEY': MISTRAL_API_KEY
+          'Authorization': `Bearer ${OPENAI_API_KEY}`
         },
         body: JSON.stringify(body),
         agent: httpsAgent
       });
-      console.log(`[MISTRAL] Response status: ${res.status} ${res.statusText}`);
+      console.log(`[OPENAI] Response status: ${res.status} ${res.statusText}`);
       
       if (res.ok) {
-        console.log(`[MISTRAL] API call successful, starting stream processing...`);
+        console.log(`[OPENAI] API call successful, starting stream processing...`);
         break;
       }
       
@@ -355,9 +353,9 @@ async function findLinkedInProfilesPlayground(req, res) {
     console.log(`[LINKEDIN] Request body:`, req.body);
     console.log(`[LINKEDIN] Contact ID:`, req.params.contactId);
     
-    if (!MISTRAL_API_KEY) {
-      console.log(`[LINKEDIN] ERROR: No Mistral API key configured`);
-      return res.status(500).json({ success: false, message: 'Mistral API key not configured' });
+    if (!OPENAI_API_KEY) {
+      console.log(`[OPENAI] ERROR: No OpenAI API key configured`);
+      return res.status(500).json({ success: false, message: 'OpenAI API key not configured' });
     }
 
     const { name, company } = req.body;

@@ -23,6 +23,12 @@ router.post('/ensure-task-folder', fileController.ensureTaskFolder);
 // Ensure tender folder exists (check and create if needed) and return tender + subfolder IDs
 router.post('/ensure-tender-folder', fileController.ensureTenderFolder);
 
+// Create subfolder in tender folder
+router.post('/folders/:parentFolderId/subfolder', fileController.createSubfolder);
+
+// Delete folder (only user-created folders)
+router.delete('/folders/:folderId', fileController.deleteFolder);
+
 // Get files by document ID and connection table
 router.get('/document/:connectionTable/:docId', fileController.getFilesByDocument);
 

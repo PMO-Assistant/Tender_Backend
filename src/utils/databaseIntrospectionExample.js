@@ -93,7 +93,7 @@ async function exampleWithAIController() {
         console.log('📝 Prompt length:', prompt.length, 'characters');
         
         // Here you would pass this prompt to your AI service
-        // const aiResponse = await mistralService.query(prompt);
+        // const aiResponse = await openAIService.query(prompt);
         
         return { dbContext, prompt };
         

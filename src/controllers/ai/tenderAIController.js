@@ -1,5 +1,6 @@
 const { getConnectedPool } = require('../../config/database');
-const mistralService = require('../../config/mistralAIService');
+const openAIService = require('../../config/openAIService');
+console.log('[AI] Using OpenAI service');
 const { getContextAndBuildPrompt } = require('../../utils/databaseIntrospection');
 const { askTenderAI } = require('../../utils/askTenderAI');
 
@@ -111,6 +112,44 @@ function validateSQLQuery(sql) {
 }
 
 /**
+ * Validate SQL syntax to prevent malformed queries
+ */
+function isValidSQLSyntax(query) {
+    // Remove extra whitespace and normalize
+    const normalizedQuery = query.replace(/\s+/g, ' ').trim();
+    
+    // Check for common SQL syntax errors
+    const syntaxErrors = [
+        /ORDER BY\s+\w+\s*;\s*WHERE/i,  // ORDER BY Name; WHERE
+        /SELECT\s+.*;\s*WHERE/i,        // SELECT ...; WHERE
+        /FROM\s+.*;\s*WHERE/i,          // FROM ...; WHERE
+        /GROUP BY\s+.*;\s*WHERE/i,      // GROUP BY ...; WHERE
+        /HAVING\s+.*;\s*WHERE/i,       // HAVING ...; WHERE
+        /;\s*WHERE/i,                   // Any semicolon before WHERE
+        /WHERE\s+.*;\s*WHERE/i,        // WHERE ...; WHERE
+        /WHERE\s+.*;\s*ORDER/i,         // WHERE ...; ORDER
+        /WHERE\s+.*;\s*GROUP/i,        // WHERE ...; GROUP
+        /WHERE\s+.*;\s*HAVING/i,       // WHERE ...; HAVING
+    ];
+    
+    // Check if query contains any syntax errors
+    for (const errorPattern of syntaxErrors) {
+        if (errorPattern.test(normalizedQuery)) {
+            console.log('❌ SQL syntax error detected:', errorPattern.source);
+            return false;
+        }
+    }
+    
+    // Basic validation - must start with SELECT
+    if (!normalizedQuery.toUpperCase().startsWith('SELECT')) {
+        console.log('❌ Query does not start with SELECT');
+        return false;
+    }
+    
+    return true;
+}
+
+/**
  * Get fallback query based on question type
  * @param {string} question 
  * @returns {string}
@@ -119,11 +158,25 @@ function getFallbackQuery(question) {
     const lowerQuestion = question.toLowerCase();
     
     if (lowerQuestion.includes('biggest') || lowerQuestion.includes('largest')) {
-        return `SELECT TOP 1 ProjectName, Value, Status, Type, OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY Value DESC`;
+        if (lowerQuestion.includes('approved') && (lowerQuestion.includes('2024') || lowerQuestion.includes('this year'))) {
+            // Be flexible with both status AND date columns for temporal queries
+            return `SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Status IN ('Approved', 'Active', 'Won', 'Awarded', 'Completed', 'Successful', 'Accepted', 'Confirmed', 'Finalized', 'Closed', 'Done', 'Finished', 'Delivered', 'Executed') AND (YEAR(OpenDate) = 2024 OR YEAR(CreatedAt) = 2024) ORDER BY Value DESC`;
+        }
+        if (lowerQuestion.includes('approved')) {
+            // Be VERY flexible with status values - try many possible positive statuses
+            return `SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Status IN ('Approved', 'Active', 'Won', 'Awarded', 'Completed', 'Successful', 'Accepted', 'Confirmed', 'Finalized', 'Closed', 'Done', 'Finished', 'Delivered', 'Executed') ORDER BY Value DESC`;
+        }
+        if (lowerQuestion.includes('pharma')) {
+            return `SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Type = 'Pharma' ORDER BY Value DESC`;
+        }
+        if (lowerQuestion.includes('new build') || lowerQuestion.includes('new-build')) {
+            return `SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Type = 'New-Build' ORDER BY Value DESC`;
+        }
+        return `SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY Value DESC`;
     }
     
     if (lowerQuestion.includes('recent') || lowerQuestion.includes('latest')) {
-        return `SELECT TOP 10 ProjectName, Value, Status, Type, CreatedAt FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY CreatedAt DESC`;
+        return `SELECT TOP 10 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, CreatedAt AS CreatedAt FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY CreatedAt DESC`;
     }
     
     if (lowerQuestion.includes('count') || lowerQuestion.includes('how many')) {
@@ -136,23 +189,38 @@ function getFallbackQuery(question) {
         if (lowerQuestion.includes('company')) {
             return `SELECT COUNT(*) AS TotalCompanies FROM tenderCompany`;
         }
+        if (lowerQuestion.includes('approved')) {
+            return `SELECT COUNT(*) AS TotalApprovedTenders FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND (Status = 'Approved' OR Status = 'Active' OR Status = 'Won' OR Status = 'Awarded' OR Status = 'Completed')`;
+        }
+        if (lowerQuestion.includes('pharma')) {
+            return `SELECT COUNT(*) AS TotalPharmaTenders FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Type = 'Pharma'`;
+        }
         return `SELECT COUNT(*) AS TotalTenders FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL)`;
     }
     
-    if (lowerQuestion.includes('user')) {
-        return `SELECT TOP 20 UserID, Name, Email, LastLogin FROM tenderEmployee ORDER BY LastLogin DESC`;
+    if (lowerQuestion.includes('user') || lowerQuestion.includes('access') || lowerQuestion.includes('portal')) {
+        if (lowerQuestion.includes('access') || lowerQuestion.includes('portal') || lowerQuestion.includes('who')) {
+            // User asking about who has access to the system
+            return `SELECT UserID AS UserID, Name AS UserName, Email AS UserEmail, LastLogin AS LastLogin FROM tenderEmployee WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY Name`;
+        }
+        return `SELECT TOP 20 UserID AS UserID, Name AS UserName, Email AS UserEmail, LastLogin AS LastLogin FROM tenderEmployee WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY LastLogin DESC`;
     }
     
     if (lowerQuestion.includes('contact')) {
-        return `SELECT TOP 20 FirstName, Surname, Email, Phone, Status FROM tenderContact WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY CreatedAt DESC`;
+        return `SELECT TOP 20 ContactID AS ContactID, FirstName + ' ' + Surname AS ContactName, Email AS ContactEmail, Phone AS ContactPhone, Status AS ContactStatus FROM tenderContact WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY CreatedAt DESC`;
     }
     
     if (lowerQuestion.includes('company')) {
-        return `SELECT TOP 20 Name, Phone, Email FROM tenderCompany ORDER BY CreatedAt DESC`;
+        return `SELECT TOP 20 CompanyID AS CompanyID, Name AS CompanyName, Phone AS CompanyPhone, Email AS CompanyEmail FROM tenderCompany ORDER BY CreatedAt DESC`;
     }
     
-    // Default fallback
-    return `SELECT TOP 10 ProjectName, Value, Status, Type, OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY CreatedAt DESC`;
+    // Default fallback - show recent tenders
+    // Default fallback - show all tenders with their statuses so user can see what's available
+    // If user asked about "approved" but got no results, show what status values actually exist
+    if (lowerQuestion.includes('approved')) {
+        return `SELECT DISTINCT Status AS TenderStatus, COUNT(*) AS Count FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) GROUP BY Status ORDER BY Count DESC`;
+    }
+    return `SELECT TOP 10 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY CreatedAt DESC`;
 }
 
 /**
@@ -197,7 +265,7 @@ function logQueryExecution(logData) {
  * @param {boolean} useIntrospection - Whether to use database introspection
  * @returns {Promise<string>} Generated prompt
  */
-async function buildPromptWithIntrospection(question, pool, useIntrospection = false) {
+async function buildPromptWithIntrospection(question, pool, useIntrospection = false, conversationHistory = []) {
     if (useIntrospection) {
         try {
             console.log('🔍 Using database introspection for prompt generation...');
@@ -218,13 +286,26 @@ async function buildPromptWithIntrospection(question, pool, useIntrospection = f
     // Fallback to hardcoded schema
     const escapedQuestion = escapeUserInput(question);
     
-    return `You are an expert SQL Server database analyst specializing in tender management systems. Your task is to understand natural language questions and convert them into precise, efficient SQL queries.
+    // Build conversation context if available
+    let conversationContext = '';
+    if (conversationHistory && conversationHistory.length > 0) {
+        conversationContext = '\n\nCONVERSATION HISTORY (for context):\n';
+        conversationHistory.slice(-5).forEach((msg, index) => { // Keep last 5 messages for context
+            conversationContext += `${index + 1}. User: ${msg.question}\n`;
+            if (msg.result && msg.result.length > 0) {
+                conversationContext += `   Result: Found ${msg.result.length} records\n`;
+            }
+        });
+        conversationContext += '\nUse this context to understand follow-up questions and references to previous results.\n';
+    }
+    
+    return `You are an expert SQL Server database analyst specializing in tender management systems. Your task is to understand natural language questions and convert them into precise, efficient SQL queries that return TABLE-FRIENDLY column sets.
 
-CONTEXT: This is a tender management system where companies bid on construction and development projects.
+CONTEXT: This is a tender management system where companies bid on construction and development projects. The user expects most answers as tables. Prefer returning explicit columns with clear aliases over SELECT *.
 
-USER QUESTION: "${escapedQuestion}"
+USER QUESTION: "${escapedQuestion}"${conversationContext}
 
-DATABASE SCHEMA:
+DATABASE SCHEMA (key tables):
 
 Core Tables:
 - tenderTender(TenderID, KeyContact, AddBy, ProjectName, OpenDate, ApplyTo, Value, ReturnDate, Status, Type, Source, ManagingTender, Consultant, Notes, CreatedAt, UpdatedAt, IsDeleted, DeletedAt)
@@ -232,100 +313,193 @@ Core Tables:
 - tenderCompany(CompanyID, AddBy, Name, Phone, Email, CreatedAt, UpdatedAt)
 - tenderEmployee(UserID, LastLogin, Name, Email)
 
+Additional Tables (explore freely):
+- tenderFolder(FolderID, ParentFolderID, FolderName, FolderPath, FolderType, DisplayOrder, IsActive, AddBy, CreatedAt, UpdatedAt, DocID, ConnectionTable)
+- tenderFile(FileID, FolderID, FileName, FilePath, FileSize, ContentType, UploadedBy, UploadedAt, IsActive)
+- tenderTask(TaskID, Title, Description, Status, Priority, AssignedTo, CreatedBy, CreatedAt, DueDate, CompletedAt)
+- tenderNotification(NotificationID, UserID, Title, Message, Type, IsRead, CreatedAt)
+- tenderWatchlist(WatchlistID, UserID, TenderID, CreatedAt)
+- tenderBOQ(BOQID, TenderID, ItemName, Description, Quantity, Unit, UnitPrice, TotalPrice, CreatedAt)
+- tenderRFI(RFIID, TenderID, Question, Answer, AskedBy, AnsweredBy, AskedAt, AnsweredAt)
+- tenderFormField(FieldID, FieldName, FieldType, FieldOptions, IsRequired, DisplayOrder)
+- tenderOrgChart(ChartID, TenderID, ChartData, CreatedBy, CreatedAt, UpdatedAt)
+- tenderOrgChartHistory(HistoryID, ChartID, ChartData, CreatedBy, CreatedAt)
+
+CRITICAL: Use EXACT column names as shown above. For tenderEmployee, use 'Name' column. If you get column errors, try alternative column names or explore the actual table structure first.
+
+Other tables may exist; explore ALL tables freely for comprehensive answers.
+
 Key Relationships:
 - tenderTender.KeyContact → tenderContact.ContactID
 - tenderContact.CompanyID → tenderCompany.CompanyID
 - tenderTender.AddBy → tenderEmployee.UserID (IMPORTANT: AddBy stores UserID)
 - tenderContact.AddBy → tenderEmployee.UserID
 - tenderCompany.AddBy → tenderEmployee.UserID
+- tenderFolder.ParentFolderID → tenderFolder.FolderID (self-referencing)
+- tenderFile.FolderID → tenderFolder.FolderID
+- tenderTask.AssignedTo → tenderEmployee.UserID
+- tenderTask.CreatedBy → tenderEmployee.UserID
+- tenderNotification.UserID → tenderEmployee.UserID
+- tenderWatchlist.UserID → tenderEmployee.UserID
+- tenderWatchlist.TenderID → tenderTender.TenderID
+- tenderBOQ.TenderID → tenderTender.TenderID
+- tenderRFI.TenderID → tenderTender.TenderID
+- tenderOrgChart.TenderID → tenderTender.TenderID
 
-CRITICAL UNDERSTANDING:
-- When user asks "biggest" or "largest" → ALWAYS use SELECT TOP 1 and ORDER BY Value DESC
-- When user mentions a specific type (pharma, new-build, fit-out, etc.) → ALWAYS filter by Type = '[type]'
-- When user asks "biggest [type] tender" → Combine both: TOP 1 + Type filter + ORDER BY Value DESC
-- When user asks "show me all" → Use SELECT TOP 20 and ORDER BY CreatedAt DESC
+CRITICAL SQL SYNTAX RULES:
+- NEVER use semicolons (;) in the middle of queries
+- NEVER mix ORDER BY with WHERE clauses incorrectly
+- ALWAYS use proper SQL syntax: SELECT ... FROM ... WHERE ... ORDER BY ...
+- NEVER generate malformed queries like "ORDER BY Name; WHERE"
+- ALWAYS validate your SQL syntax before generating
 
-EXAMPLES:
-- "What's the biggest pharma tender?" → SELECT TOP 1 ProjectName, Value, Status, Type FROM tenderTender WHERE IsDeleted = 0 AND Type = 'Pharma' ORDER BY Value DESC
-- "What's the biggest New Build tender?" → SELECT TOP 1 ProjectName, Value, Status, Type FROM tenderTender WHERE IsDeleted = 0 AND Type = 'New-Build' ORDER BY Value DESC
-- "Show me all tenders" → SELECT TOP 20 ProjectName, Value, Status, Type FROM tenderTender WHERE IsDeleted = 0 ORDER BY CreatedAt DESC
-- "What's the biggest tender?" → SELECT TOP 1 ProjectName, Value, Status, Type FROM tenderTender WHERE IsDeleted = 0 ORDER BY Value DESC
+INTELLIGENT REASONING INSTRUCTIONS:
 
-IMPORTANT GUIDELINES:
-1. **PRIORITIZE USER INTENT**: Always focus on the specific question asked, not generic responses
-   - If user asks for "biggest" or "largest" → ALWAYS use TOP 1 with ORDER BY Value DESC
-   - If user asks for specific type (e.g., "Pharma", "New Build") → ALWAYS filter by Type = '[type]'
-   - If user asks for "all" → Show all results with TOP 20
-   - If user asks for "recent" → Use ORDER BY CreatedAt DESC with TOP 10-20
+1. ANALYZE THE QUESTION CONTEXT:
+   - Look for comparative terms: "biggest", "largest", "smallest", "highest", "lowest"
+   - Identify filtering criteria: "approved", "active", "pending", "rejected", "pharma", "construction"
+   - Recognize temporal references: "recent", "latest", "oldest", "this year", "last month"
+   - Understand counting requests: "how many", "count", "total", "number of"
 
-2. **Query Intelligence**: Understand the intent behind the question
-   - "biggest" or "largest" → ORDER BY Value DESC LIMIT 1
-   - "recent" or "latest" → ORDER BY CreatedAt DESC
-   - "count" or "how many" → COUNT() with GROUP BY
-   - "active" → WHERE Status = 'active' OR IsDeleted = 0
-   - "by type" or "grouped by" → GROUP BY with COUNT()
-   - "users" or "employees" → Use tenderEmployee table
-   - "contacts" → Use tenderContact table
-   - "companies" → Use tenderCompany table
-   - "added by [name]" or "[name] added" → JOIN tenderTender.AddBy with tenderEmployee.UserID WHERE tenderEmployee.Name LIKE '%name%'
-   - "tenders by [user]" → JOIN tables to find tenders by specific user
+2. DATA-DRIVEN REASONING (CRITICAL):
+   - NEVER assume exact word matches for status values
+   - ALWAYS explore the actual data first when filtering by status
+   - For "approved" queries, use this intelligent approach:
+     * First: Try common positive status values
+     * If no results: Query what status values actually exist
+     * Adapt based on actual data found
+   - For temporal queries (2024, this year, etc.), be flexible with date columns
+   - For type queries, explore what types actually exist
 
-3. **Data Quality**: 
-   - Always filter out deleted records: WHERE IsDeleted = 0 OR IsDeleted IS NULL
-   - Use meaningful column aliases for clarity (e.g., Type AS TenderType, COUNT(*) AS TenderCount)
-   - Format currency values properly
-   - Include relevant dates when available
+3. SMART COLUMN INFERENCE:
+   - When user asks about "biggest approved", reason that you need to:
+     * First try: Status IN ('Approved', 'Active', 'Won', 'Awarded', 'Completed', 'Successful', 'Accepted', 'Confirmed', 'Finalized', 'Closed')
+     * If no results: Show what status values exist with counts
+     * Order by Value DESC
+     * Use TOP 1 for single result
+   - When user asks "biggest in 2024", be flexible with date columns:
+     * Try OpenDate, CreatedAt, UpdatedAt
+     * Use YEAR() function or date ranges
+     * If no results, show what date ranges exist
 
-4. **Performance & Safety**:
-   - Use TOP clauses for "biggest" or "largest" queries
-   - Limit results to prevent overwhelming responses
-   - Only use SELECT statements (no INSERT, UPDATE, DELETE)
-   - Always qualify table names to avoid ambiguity
+4. CONVERSATION CONTEXT REASONING:
+   - If previous question was about "biggest tender" and current question is "what about approved ones"
+   - Reason that user wants the biggest tender but filtered by approved status
+   - Apply the same Value DESC ordering but add Status filter
 
-5. **Common Query Patterns**:
-   - For "biggest tender": SELECT TOP 1 ProjectName, Value, Status, Type, OpenDate FROM tenderTender WHERE IsDeleted = 0 ORDER BY Value DESC
-   - For "biggest [type] tender": SELECT TOP 1 ProjectName, Value, Status, Type, OpenDate FROM tenderTender WHERE IsDeleted = 0 AND Type = '[type]' ORDER BY Value DESC
-   - For "recent contacts": SELECT TOP 10 FirstName, Surname, Company, CreatedAt FROM tenderContact WHERE IsDeleted = 0 ORDER BY CreatedAt DESC
-   - For "count by type": SELECT Type AS TenderType, COUNT(*) AS TenderCount FROM tenderTender WHERE IsDeleted = 0 GROUP BY Type ORDER BY TenderCount DESC
-   - For "how many tenders": SELECT COUNT(*) AS TotalTenders FROM tenderTender WHERE IsDeleted = 0
-   - For "tenders by status": SELECT Status AS TenderStatus, COUNT(*) AS TenderCount FROM tenderTender WHERE IsDeleted = 0 GROUP BY Status ORDER BY TenderCount DESC
-   - For "how many users": SELECT COUNT(*) AS TotalUsers FROM tenderEmployee
-   - For "how many contacts": SELECT COUNT(*) AS TotalContacts FROM tenderContact WHERE IsDeleted = 0
-   - For "how many companies": SELECT COUNT(*) AS TotalCompanies FROM tenderCompany
-   - For "show me all users": SELECT TOP 20 UserID, Name, Email, LastLogin FROM tenderEmployee ORDER BY LastLogin DESC
-   - For "show me all contacts": SELECT TOP 20 FirstName, Surname, Email, Phone, Status FROM tenderContact WHERE IsDeleted = 0 ORDER BY CreatedAt DESC
-   - For "show me all companies": SELECT TOP 20 Name, Phone, Email FROM tenderCompany ORDER BY CreatedAt DESC
-   - For "show me all tenders": SELECT TOP 20 ProjectName, Value, Status, Type, OpenDate FROM tenderTender WHERE IsDeleted = 0 ORDER BY CreatedAt DESC
-   - For "tenders added by [name]": SELECT t.ProjectName, t.Value, t.Status, t.Type, t.OpenDate, e.Name AS AddedBy FROM tenderTender t JOIN tenderEmployee e ON t.AddBy = e.UserID WHERE t.IsDeleted = 0 AND e.Name LIKE '%[name]%' ORDER BY t.CreatedAt DESC
-   - For "tenders by user": SELECT t.ProjectName, t.Value, t.Status, t.Type, t.OpenDate, e.Name AS AddedBy FROM tenderTender t JOIN tenderEmployee e ON t.AddBy = e.UserID WHERE t.IsDeleted = 0 ORDER BY t.CreatedAt DESC
+5. DYNAMIC QUERY CONSTRUCTION:
+   - Always include IsDeleted = 0 OR IsDeleted IS NULL filters
+   - Use appropriate JOINs when referencing related data
+   - Apply TOP clauses for "biggest", "smallest", "recent" queries
+   - Use COUNT() for counting requests
+   - Use GROUP BY for aggregation requests
+   - When filtering by status, try multiple possible values or explore existing values first
 
-6. **Smart Column Aliasing**:
-   - Always use descriptive aliases: Type AS TenderType, COUNT(*) AS TenderCount, Status AS TenderStatus
-   - For counts: use TenderCount, TotalCount, or NumberOfTenders
-   - For categories: use TenderType, Category, or Type
-   - For status: use TenderStatus, CurrentStatus, or Status
-   - For user relationships: use AddedBy, CreatedBy, or UserName
+6. COLUMN ALIASING FOR CLARITY:
+   - Use descriptive aliases: ProjectName AS ProjectName, Value AS TenderValue
+   - Include relevant context columns: Status AS TenderStatus, Type AS TenderType
+   - Add temporal context: CreatedAt AS CreatedDate, OpenDate AS OpenDate
 
-7. **JOIN Patterns for User Relationships**:
-   - When user name is mentioned: JOIN tenderTender t JOIN tenderEmployee e ON t.AddBy = e.UserID WHERE e.Name LIKE '%[name]%'
-   - When user ID is mentioned: JOIN tenderTender t JOIN tenderEmployee e ON t.AddBy = e.UserID WHERE e.UserID = [id]
-   - For all tenders with user info: SELECT t.*, e.Name AS AddedBy FROM tenderTender t JOIN tenderEmployee e ON t.AddBy = e.UserID
+7. INTELLIGENT STATUS FILTERING (BE VERY FLEXIBLE):
+   - Don't assume exact word matches for status values
+   - For "approved" queries, try multiple approaches:
+     * First try: Status IN ('Approved', 'Active', 'Won', 'Awarded', 'Completed', 'Successful', 'Accepted', 'Confirmed', 'Finalized', 'Closed', 'Done', 'Finished')
+     * If no results, explore what status values actually exist
+     * Use LIKE patterns for partial matches if needed
+   - For "active" queries, consider: Status = 'Active' OR Status LIKE '%Active%' OR IsDeleted = 0
+   - Always show the actual status values in results so user can see what exists
 
-CRITICAL: When asked about "biggest" or "largest" tenders, ALWAYS use this exact query pattern:
-SELECT TOP 1 ProjectName, Value, Status, Type, OpenDate 
-FROM tenderTender 
-WHERE (IsDeleted = 0 OR IsDeleted IS NULL) 
-ORDER BY Value DESC
+8. TEMPORAL QUERY FLEXIBILITY:
+   - For "2024" queries, try multiple date columns: OpenDate, CreatedAt, UpdatedAt
+   - Use flexible date matching: YEAR(OpenDate) = 2024 OR YEAR(CreatedAt) = 2024
+   - If no results, show what date ranges exist in the data
+   - Be flexible with date formats and null handling
 
-CRITICAL: When asked about "biggest [type]" tenders, ALWAYS use this exact query pattern:
-SELECT TOP 1 ProjectName, Value, Status, Type, OpenDate 
-FROM tenderTender 
-WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Type = '[type]'
-ORDER BY Value DESC
+9. COLUMN NAME INTELLIGENCE:
+   - ALWAYS use exact column names as specified in the schema
+   - If you get "Invalid column name" errors, try alternative column names
+   - For tenderEmployee table, try: Name, UserName, EmployeeName, FullName
+   - If JOINs fail, explore the actual table structure first
+   - Use SELECT TOP 1 * FROM tableName to explore actual column names when needed
 
-CRITICAL: Return ONLY the SQL query, no explanations, no comments, no additional text. Just the SQL query wrapped in \`\`\`sql blocks.
+EXAMPLES OF INTELLIGENT REASONING:
 
-TASK: Generate a single, optimized SQL query that best answers the user's question. Return ONLY the SQL query wrapped in \`\`\`sql blocks.
+Question: "What's the biggest tender?"
+Reasoning: User wants the tender with highest Value. Need TOP 1, ORDER BY Value DESC, include IsDeleted filter.
+Query: SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY Value DESC
+
+Question: "What about the biggest approved one?"
+Reasoning: User is following up on "biggest tender" but wants only approved ones. Be VERY flexible with status values - try many possible positive statuses.
+Query: SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Status IN ('Approved', 'Active', 'Won', 'Awarded', 'Completed', 'Successful', 'Accepted', 'Confirmed', 'Finalized', 'Closed', 'Done', 'Finished') ORDER BY Value DESC
+
+Question: "What's the biggest approved tender in 2024?"
+Reasoning: User wants biggest approved tender from 2024. Be flexible with both status AND date columns. Try multiple date columns if needed.
+Query: SELECT TOP 1 ProjectName AS ProjectName, Value AS TenderValue, Status AS TenderStatus, Type AS TenderType, OpenDate AS OpenDate FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Status IN ('Approved', 'Active', 'Won', 'Awarded', 'Completed', 'Successful', 'Accepted', 'Confirmed', 'Finalized', 'Closed', 'Done', 'Finished') AND (YEAR(OpenDate) = 2024 OR YEAR(CreatedAt) = 2024) ORDER BY Value DESC
+
+Question: "What status values exist for tenders?"
+Reasoning: User wants to explore what status values actually exist in the database. Use DISTINCT to show unique status values.
+Query: SELECT DISTINCT Status AS TenderStatus, COUNT(*) AS Count FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) GROUP BY Status ORDER BY Count DESC
+
+Question: "What date ranges exist in the data?"
+Reasoning: User wants to explore what date ranges exist. Show min/max dates for different date columns.
+Query: SELECT 'OpenDate' AS DateColumn, MIN(OpenDate) AS MinDate, MAX(OpenDate) AS MaxDate FROM tenderTender WHERE OpenDate IS NOT NULL UNION ALL SELECT 'CreatedAt' AS DateColumn, MIN(CreatedAt) AS MinDate, MAX(CreatedAt) AS MaxDate FROM tenderTender WHERE CreatedAt IS NOT NULL
+
+Question: "Who has access to this tender portal?"
+Reasoning: User wants to know who can access the system. This means finding all users/employees who have accounts. Look at tenderEmployee table for all active users.
+Query: SELECT UserID AS UserID, Name AS UserName, Email AS UserEmail, LastLogin AS LastLogin FROM tenderEmployee WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY Name
+
+Question: "How many users are in the system?"
+Reasoning: User wants a count of total users. Count all active employees.
+Query: SELECT COUNT(*) AS TotalUsers FROM tenderEmployee WHERE (IsDeleted = 0 OR IsDeleted IS NULL)
+
+Question: "What if no approved tenders found in 2024?"
+Reasoning: If the main query returns no results, show what data actually exists to help user understand the data structure.
+Query: SELECT 'Status Values' AS DataType, Status AS Value, COUNT(*) AS Count FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) GROUP BY Status UNION ALL SELECT 'Date Ranges' AS DataType, CONCAT(YEAR(OpenDate), '-', YEAR(CreatedAt)) AS Value, COUNT(*) AS Count FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND OpenDate IS NOT NULL GROUP BY YEAR(OpenDate), YEAR(CreatedAt)
+
+Question: "Show me all tasks assigned to users"
+Reasoning: User wants to explore task assignments. JOIN tenderTask with tenderEmployee to show comprehensive task data.
+Query: SELECT t.TaskID AS TaskID, t.Title AS TaskTitle, t.Status AS TaskStatus, t.Priority AS TaskPriority, e.Name AS AssignedTo, t.CreatedAt AS CreatedDate, t.DueDate AS DueDate FROM tenderTask t LEFT JOIN tenderEmployee e ON t.AssignedTo = e.UserID ORDER BY t.CreatedAt DESC
+
+Question: "What files are in the system?"
+Reasoning: User wants to explore file data. JOIN tenderFile with tenderFolder to show comprehensive file information.
+Query: SELECT f.FileID AS FileID, f.FileName AS FileName, f.FileSize AS FileSize, f.ContentType AS ContentType, fo.FolderPath AS FolderPath, f.UploadedAt AS UploadedDate FROM tenderFile f LEFT JOIN tenderFolder fo ON f.FolderID = fo.FolderID WHERE f.IsActive = 1 ORDER BY f.UploadedAt DESC
+
+Question: "Show me all notifications for users"
+Reasoning: User wants to explore notification data. JOIN tenderNotification with tenderEmployee to show comprehensive notification information.
+Query: SELECT n.NotificationID AS NotificationID, n.Title AS NotificationTitle, n.Message AS NotificationMessage, n.Type AS NotificationType, e.Name AS UserName, n.IsRead AS IsRead, n.CreatedAt AS CreatedDate FROM tenderNotification n LEFT JOIN tenderEmployee e ON n.UserID = e.UserID ORDER BY n.CreatedAt DESC
+
+Question: "What if column name 'Name' doesn't exist in tenderEmployee?"
+Reasoning: If you get "Invalid column name 'Name'" error, explore the actual table structure first to find the correct column name.
+Query: SELECT TOP 1 * FROM tenderEmployee
+
+Question: "Show me 10 biggest tenders with user info"
+Reasoning: User wants biggest tenders with user information. If Name column fails, try alternative column names or explore table structure.
+Query: SELECT TOP 10 t.TenderID AS TenderID, t.ProjectName AS ProjectName, t.Value AS TenderValue, t.Status AS TenderStatus, t.Type AS TenderType, e.Name AS AddedBy FROM tenderTender t LEFT JOIN tenderEmployee e ON t.AddBy = e.UserID WHERE (t.IsDeleted = 0 OR t.IsDeleted IS NULL) ORDER BY t.Value DESC
+
+Question: "How many pharma tenders are there?"
+Reasoning: User wants count of tenders filtered by Type = 'Pharma'. Need COUNT() with WHERE clause.
+Query: SELECT COUNT(*) AS TotalPharmaTenders FROM tenderTender WHERE (IsDeleted = 0 OR IsDeleted IS NULL) AND Type = 'Pharma'
+
+Question: "Show me recent contacts"
+Reasoning: User wants contacts ordered by most recent. Need ORDER BY CreatedAt DESC with TOP for recent ones.
+Query: SELECT TOP 20 FirstName, Surname, Email, Phone, Status, CreatedAt AS CreatedDate FROM tenderContact WHERE (IsDeleted = 0 OR IsDeleted IS NULL) ORDER BY CreatedAt DESC
+
+CRITICAL REQUIREMENTS:
+- ALWAYS reason about the question before writing SQL
+- NEVER hardcode specific values unless explicitly mentioned by user
+- ALWAYS include IsDeleted = 0 OR IsDeleted IS NULL filters
+- USE descriptive column aliases for better table presentation
+- APPLY appropriate TOP clauses for single-result queries
+- INCLUDE relevant context columns (Status, Type, dates) when available
+- REASON about conversation context for follow-up questions
+- WHEN NO RESULTS FOUND: Show what data actually exists (status values, date ranges, etc.)
+- BE ULTRA-FLEXIBLE with status values and date columns
+- EXPLORE ACTUAL DATA STRUCTURE when queries return empty results
+- EXPLORE ALL TABLES FREELY - you can query any table in the database
+- NEVER use INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, EXEC, EXECUTE, TRUNCATE, BACKUP, RESTORE, GRANT, REVOKE, DENY, MERGE, BULK INSERT, OPENROWSET, OPENQUERY
+- ONLY use SELECT and WITH statements for data exploration
+- JOIN tables freely to provide comprehensive answers
+- Use UNION ALL to combine results from multiple tables when relevant
 
 Remember: Focus on the most relevant information for the user's question and use clear, descriptive column aliases. DO NOT include any explanatory text or comments in your response.`;
 }
@@ -336,7 +510,7 @@ Remember: Focus on the most relevant information for the user's question and use
  */
 const askTenderAIController = async (req, res) => {
     const startTime = Date.now();
-    const { question, useIntrospection = false, useNewModule = false } = req.body;
+    const { question, useIntrospection = false, useNewModule = false, conversationHistory = [] } = req.body;
 
     if (!question || question.trim() === '') {
         return res.status(400).json({ error: 'Question is required.' });
@@ -377,13 +551,65 @@ const askTenderAIController = async (req, res) => {
         // Step 1: Build prompt using introspection or hardcoded schema
         const pool = await getConnectedPool();
         const escapedQuestion = escapeUserInput(question);
-        const prompt = await buildPromptWithIntrospection(escapedQuestion, pool, useIntrospection);
+        const prompt = await buildPromptWithIntrospection(escapedQuestion, pool, useIntrospection, conversationHistory);
 
         console.log('🤖 Original question:', question);
         console.log('🤖 Question being sent to AI:', escapedQuestion);
         console.log('📝 Prompt length:', prompt.length, 'characters');
 
-        const { generated_query } = await mistralService.query(prompt);
+        let generated_query;
+        try {
+            const aiResponse = await openAIService.query(prompt);
+            generated_query = aiResponse.generated_query;
+        } catch (openAIError) {
+            console.log('❌ OpenAI API failed:', openAIError.message);
+            
+            // If OpenAI fails, use intelligent fallback based on question
+            console.log('🔄 OpenAI API failed, using intelligent fallback...');
+            const fallbackQuery = getFallbackQuery(question);
+            console.log('🔄 Using intelligent fallback query:', fallbackQuery);
+            
+            try {
+                const result = await pool.request().query(fallbackQuery);
+                
+                const logData = {
+                    originalQuestion: question,
+                    generatedSQL: 'OPENAI_API_FAILED',
+                    cleanedSQL: fallbackQuery,
+                    resultCount: result.recordset.length,
+                    fallbackUsed: true,
+                    success: true,
+                    error: null,
+                    executionTime: Date.now() - startTime
+                };
+                logQueryExecution(logData);
+
+                return res.json({
+                    question,
+                    query: fallbackQuery,
+                    result: result.recordset,
+                    fallbackUsed: true,
+                    openAIFailed: true
+                });
+            } catch (fallbackError) {
+                const logData = {
+                    originalQuestion: question,
+                    generatedSQL: 'OPENAI_API_FAILED',
+                    cleanedSQL: fallbackQuery,
+                    resultCount: 0,
+                    fallbackUsed: true,
+                    success: false,
+                    error: fallbackError.message,
+                    executionTime: Date.now() - startTime
+                };
+                logQueryExecution(logData);
+                
+                return res.status(500).json({
+                    error: 'AI service temporarily unavailable. Please try again later.',
+                    details: 'OpenAI API capacity exceeded'
+                });
+            }
+        }
 
         console.log('🤖 Generated SQL:', generated_query);
 
@@ -459,16 +685,41 @@ const askTenderAIController = async (req, res) => {
         // Step 3: Inject IsDeleted filter if missing
         const finalQuery = injectIsDeletedFilter(cleanedQuery);
 
-        // Step 4: Execute the query
+        // Step 3.5: Validate SQL syntax before execution
+        if (!isValidSQLSyntax(finalQuery)) {
+            console.log('❌ Invalid SQL syntax detected, using fallback query...');
+            console.log('❌ Malformed query:', finalQuery);
+            
+            const fallbackQuery = getFallbackQuery(question);
+            console.log('🔄 Using fallback query:', fallbackQuery);
+            
+            try {
+                result = await pool.request().query(fallbackQuery);
+                fallbackUsed = true;
+            } catch (fallbackError) {
+                const logData = {
+                    originalQuestion: question,
+                    generatedSQL: generated_query,
+                    cleanedSQL: finalQuery,
+                    resultCount: 0,
+                    fallbackUsed: true,
+                    success: false,
+                    error: fallbackError.message,
+                    executionTime: Date.now() - startTime
+                };
+                logQueryExecution(logData);
+                
+                throw fallbackError;
+            }
+        } else {
+            // Step 4: Execute the validated query
         console.log('🔍 Executing query:', finalQuery);
-        
-        let result;
-        let fallbackUsed = false;
         
         try {
             result = await pool.request().query(finalQuery);
         } catch (queryError) {
             console.log('❌ Query failed, trying fallback query...');
+                console.log('❌ Query error:', queryError.message);
             fallbackUsed = true;
             
             // Get appropriate fallback query
@@ -491,6 +742,7 @@ const askTenderAIController = async (req, res) => {
                 logQueryExecution(logData);
                 
                 throw fallbackError;
+                }
             }
         }
         
