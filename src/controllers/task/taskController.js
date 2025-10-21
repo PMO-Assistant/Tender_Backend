@@ -12,7 +12,7 @@ async function ensureNotificationTable(pool) {
     `);
     
     if (tableCheck.recordset.length === 0) {
-      console.log('[NOTIFICATION] tenderNotification table does not exist, creating it...');
+      if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log('[NOTIFICATION] tenderNotification table does not exist, creating it...');
       
       // Create the table
       await pool.request().query(`
@@ -28,9 +28,9 @@ async function ensureNotificationTable(pool) {
         )
       `);
       
-      console.log('[NOTIFICATION] tenderNotification table created successfully');
+      if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log('[NOTIFICATION] tenderNotification table created successfully');
     } else {
-      console.log('[NOTIFICATION] tenderNotification table already exists');
+      if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log('[NOTIFICATION] tenderNotification table already exists');
     }
   } catch (error) {
     console.error('[NOTIFICATION] Error ensuring notification table:', error);
@@ -56,10 +56,10 @@ async function getUserDetails(pool, userId) {
         email: rawUser.Email || rawUser.email || null,
         name: rawUser.Name || rawUser.name || 'Unknown'
       };
-      console.log(`[EMAIL] Found user: ${user.name} (${user.email})`);
+  if (process.env.VERBOSE_EMAIL === 'true') console.log(`[EMAIL] Found user: ${user.name} (${user.email})`);
       return user;
     } else {
-      console.log(`[EMAIL] User not found or inactive: ${userId}`);
+  if (process.env.VERBOSE_EMAIL === 'true') console.log(`[EMAIL] User not found or inactive: ${userId}`);
       return null;
     }
   } catch (error) {
@@ -89,7 +89,7 @@ async function sendTaskEmailNotifications(pool, taskId, userId, templateType, ta
       `);
     
     const assignees = assigneesResult.recordset;
-    console.log(`[EMAIL] Raw assignees data for task ${taskId}:`, assignees);
+    if (process.env.VERBOSE_EMAIL === 'true') console.log(`[EMAIL] Raw assignees data for task ${taskId}:`, assignees);
     
     // Normalize email field (handle different casing)
     const normalizedAssignees = assignees.map(assignee => ({
@@ -98,11 +98,11 @@ async function sendTaskEmailNotifications(pool, taskId, userId, templateType, ta
       name: assignee.Name || assignee.name || 'Unknown'
     }));
     
-    console.log(`[EMAIL] Normalized assignees for task ${taskId}:`, normalizedAssignees.map(a => `${a.name} (${a.email})`));
+    if (process.env.VERBOSE_EMAIL === 'true') console.log(`[EMAIL] Normalized assignees for task ${taskId}:`, normalizedAssignees.map(a => `${a.name} (${a.email})`));
     
     // Debug each assignee's email field
     normalizedAssignees.forEach((assignee, index) => {
-      console.log(`[EMAIL] Assignee ${index + 1}:`, {
+      if (process.env.VERBOSE_EMAIL === 'true') console.log(`[EMAIL] Assignee ${index + 1}:`, {
         UserID: assignee.UserID,
         Name: assignee.name,
         Email: assignee.email,
@@ -112,7 +112,7 @@ async function sendTaskEmailNotifications(pool, taskId, userId, templateType, ta
     });
     
     if (normalizedAssignees.length === 0) {
-      console.log('[EMAIL] No active assignees found for email notification');
+      if (process.env.VERBOSE_EMAIL === 'true') console.log('[EMAIL] No active assignees found for email notification');
       return;
     }
 
@@ -132,10 +132,10 @@ async function sendTaskEmailNotifications(pool, taskId, userId, templateType, ta
     };
 
     // Send email notifications to all assignees
-    console.log(`[EMAIL] Sending ${templateType} emails to ${normalizedAssignees.length} assignees for task ${taskId}`);
+    if (process.env.VERBOSE_EMAIL === 'true') console.log(`[EMAIL] Sending ${templateType} emails to ${normalizedAssignees.length} assignees for task ${taskId}`);
     const emailResults = await sendBulkEmailNotifications(normalizedAssignees, templateType, emailData);
     
-    console.log(`[EMAIL] Email results for task ${taskId}:`, emailResults);
+    if (process.env.VERBOSE_EMAIL === 'true') console.log(`[EMAIL] Email results for task ${taskId}:`, emailResults);
     return emailResults;
     
   } catch (error) {

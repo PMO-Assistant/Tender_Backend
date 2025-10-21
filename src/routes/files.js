@@ -35,14 +35,14 @@ router.get('/document/:connectionTable/:docId', fileController.getFilesByDocumen
 // Get all files for the authenticated user
 router.get('/', fileController.getAllFiles);
 
+// New search endpoint (must be before /:fileId route)
+router.get('/search', fileController.searchFiles);
+
+// Search with custom filter endpoint
+router.post('/search-filter', fileController.searchFilesWithFilter);
+
 // Get file by ID
 router.get('/:fileId', fileController.getFileById);
-
-// Get file metadata
-router.get('/:fileId/metadata', fileController.getFileMetadata);
-
-// New search endpoint
-router.get('/search', fileController.searchFiles);
 
 // Upload file
 router.post('/upload', upload.single('file'), fileController.uploadFile);

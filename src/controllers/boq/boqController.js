@@ -1,7 +1,7 @@
 const axios = require('axios');
 const ExcelJS = require('exceljs');
 const { getConnectedPool } = require('../../config/database');
-const { downloadFile } = require('../../config/azureBlobService');
+const { downloadFile, uploadFile } = require('../../config/azureBlobService');
 const openAIService = require('../../config/openAIService');
 
 async function streamToBuffer(readableStream) {
@@ -336,7 +336,7 @@ BOQ text (may be truncated):\n${truncated}`;
 }
 
 // ExcelJS-based BOQ splitting functions - User selects row ranges per package
-async function splitBOQIntoPackages(fileBuffer, fileName, packages, packageRanges) {
+async function splitBOQIntoPackages(fileBuffer, fileName, packages, packageRanges, headerRange) {
   try {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(fileBuffer);
@@ -365,12 +365,20 @@ async function splitBOQIntoPackages(fileBuffer, fileName, packages, packageRange
       packageWorkbook.created = workbook.created;
       packageWorkbook.modified = workbook.modified;
       
-      // Find the source sheet (usually the first one with data)
-      const sourceSheet = workbook.worksheets[0];
+      // Find the source sheet (use selected sheet if provided)
+      const selectedSheetName = packageRange.sheet;
+      const sourceSheet = (selectedSheetName ? workbook.getWorksheet(selectedSheetName) : null) || workbook.worksheets[0];
       if (!sourceSheet) continue;
       
-      // Copy EXACT rows for this package with all formatting
-      await copyPackageRows(sourceSheet, packageWorksheet, packageRange);
+      // 1) Copy header range (if provided) with full formatting
+      let nextTargetRow = 1;
+      if (headerRange && headerRange.start && headerRange.end) {
+        const headerRowsCopied = await copyHeaderRange(sourceSheet, packageWorksheet, headerRange);
+        nextTargetRow = headerRowsCopied + 1;
+      }
+
+      // 2) Copy EXACT rows for this package with all formatting, starting after header
+      await copyPackageRows(sourceSheet, packageWorksheet, packageRange, nextTargetRow);
       
       // Generate buffer for this package
       const packageBuffer = await packageWorkbook.xlsx.writeBuffer();
@@ -905,12 +913,111 @@ async function extractBOQStructureFromBuffer(fileBuffer) {
   }
 }
 
-async function copyPackageRows(sourceSheet, targetSheet, packageRange) {
+function columnLettersToNumber(letters) {
+  let result = 0;
+  const upper = String(letters || '').toUpperCase();
+  for (let i = 0; i < upper.length; i++) {
+    result = result * 26 + (upper.charCodeAt(i) - 64);
+  }
+  return result;
+}
+
+function parseA1Range(range) {
+  // e.g., "A1:F1" -> { startCol, startRow, endCol, endRow }
+  if (!range || !range.start || !range.end) return null;
+  const startMatch = range.start.match(/([A-Za-z]+)(\d+)/);
+  const endMatch = range.end.match(/([A-Za-z]+)(\d+)/);
+  if (!startMatch || !endMatch) return null;
+  const startCol = columnLettersToNumber(startMatch[1]);
+  const startRow = parseInt(startMatch[2], 10);
+  const endCol = columnLettersToNumber(endMatch[1]);
+  const endRow = parseInt(endMatch[2], 10);
+  return { startCol, startRow, endCol, endRow };
+}
+
+async function copyHeaderRange(sourceSheet, targetSheet, headerRange) {
+  const parsed = parseA1Range(headerRange);
+  if (!parsed) return 0;
+  const { startCol, startRow, endCol, endRow } = parsed;
+  let targetRowIndex = 1;
+
+  for (let r = startRow; r <= endRow; r++) {
+    const sourceRowObj = sourceSheet.getRow(r);
+    const targetRowObj = targetSheet.getRow(targetRowIndex);
+    if (sourceRowObj.height) targetRowObj.height = sourceRowObj.height;
+
+    for (let c = startCol; c <= endCol; c++) {
+      const sourceCell = sourceRowObj.getCell(c);
+      const targetCell = targetRowObj.getCell(c - startCol + 1);
+      targetCell.value = getSafeCellValue(sourceCell);
+      if (sourceCell.font) targetCell.font = { ...sourceCell.font };
+      if (sourceCell.fill) targetCell.fill = { ...sourceCell.fill };
+      if (sourceCell.border) targetCell.border = { ...sourceCell.border };
+      if (sourceCell.alignment) targetCell.alignment = { ...sourceCell.alignment };
+      if (sourceCell.numFmt) targetCell.numFmt = sourceCell.numFmt;
+      if (sourceCell.style) targetCell.style = sourceCell.style;
+      if (sourceCell.protection) targetCell.protection = { ...sourceCell.protection };
+    }
+
+    targetRowIndex++;
+  }
+
+  // Copy merged cells within header range
+  if (sourceSheet.model && sourceSheet.model.merges) {
+    for (const merge of sourceSheet.model.merges) {
+      const mergeStartRow = merge.top;
+      const mergeEndRow = merge.bottom;
+      const mergeStartCol = merge.left;
+      const mergeEndCol = merge.right;
+      const inRowRange = mergeStartRow >= startRow && mergeEndRow <= endRow;
+      const inColRange = mergeStartCol >= startCol && mergeEndCol <= endCol;
+      if (inRowRange && inColRange) {
+        const newTop = mergeStartRow - startRow + 1;
+        const newBottom = mergeEndRow - startRow + 1;
+        const newLeft = mergeStartCol - startCol + 1;
+        const newRight = mergeEndCol - startCol + 1;
+        targetSheet.mergeCells(newTop, newLeft, newBottom, newRight);
+      }
+    }
+  }
+
+  // Copy column properties for header width consistency
+  sourceSheet.columns.forEach((column, index) => {
+    const targetColumn = targetSheet.getColumn(index + 1);
+    if (column.width) targetColumn.width = column.width;
+    if (column.hidden) targetColumn.hidden = column.hidden;
+    if (column.style) targetColumn.style = column.style;
+    if (column.outlineLevel) targetColumn.outlineLevel = column.outlineLevel;
+  });
+
+  return endRow - startRow + 1;
+}
+
+function getSafeCellValue(cell) {
+  const val = cell ? cell.value : undefined;
+  if (!val) return val;
+  if (typeof val === 'object') {
+    // Avoid copying formulas/shared formulas; write calculated result or null
+    if (val.formula || val.sharedFormula) {
+      return typeof cell.result !== 'undefined' ? cell.result : null;
+    }
+    // Pass-through safe object types (e.g., hyperlinks, richText)
+    if (val.hyperlink) {
+      return { text: val.text, hyperlink: val.hyperlink };
+    }
+    if (val.richText) {
+      return { richText: val.richText };
+    }
+  }
+  return val;
+}
+
+async function copyPackageRows(sourceSheet, targetSheet, packageRange, targetStartRow = 1) {
   try {
-    console.log(`Copying rows ${packageRange.startRow}-${packageRange.endRow} to target sheet`);
+    console.log(`Copying rows ${packageRange.startRow}-${packageRange.endRow} to target sheet at row ${targetStartRow}`);
     
     // Copy EXACT rows for this package with all formatting
-    let targetRow = 1;
+    let targetRow = targetStartRow;
     for (let sourceRow = packageRange.startRow; sourceRow <= packageRange.endRow; sourceRow++) {
       const sourceRowObj = sourceSheet.getRow(sourceRow);
       const targetRowObj = targetSheet.getRow(targetRow);
@@ -924,13 +1031,8 @@ async function copyPackageRows(sourceSheet, targetSheet, packageRange) {
       sourceRowObj.eachCell({ includeEmpty: true }, (cell, colNumber) => {
         const targetCell = targetRowObj.getCell(colNumber);
         
-        // Copy value (handle formulas by copying calculated values)
-        if (cell.value && typeof cell.value === 'object' && cell.value.formula) {
-          // Copy the calculated result instead of the formula to avoid #REF errors
-          targetCell.value = cell.result || cell.value;
-        } else {
-          targetCell.value = cell.value;
-        }
+        // Copy value safely (avoid formula objects)
+        targetCell.value = getSafeCellValue(cell);
         
         // Copy ALL formatting properties
         if (cell.font) targetCell.font = { ...cell.font };
@@ -1319,6 +1421,219 @@ function createFallbackBOQBlocks(text, packages) {
 }
 
 const boqController = {
+  // GET /api/boq/tender/:tenderId
+  listTenderBoQ: async (req, res) => {
+    try {
+      const { tenderId } = req.params;
+      const pool = await getConnectedPool();
+      const result = await pool.request()
+        .input('TenderID', tenderId)
+        .query(`
+          SELECT 
+            b.BoQID,
+            b.TenderID,
+            b.FileID,
+            b.UploadedAt,
+            b.Description,
+            f.DisplayName,
+            f.BlobPath,
+            f.ContentType
+          FROM tenderBoQ b
+          LEFT JOIN tenderFile f ON f.FileID = b.FileID
+          WHERE b.TenderID = @TenderID
+          ORDER BY b.UploadedAt DESC, b.BoQID DESC
+        `);
+      return res.json({ success: true, items: result.recordset });
+    } catch (error) {
+      console.error('Error listing tender BOQ:', error);
+      res.status(500).json({ error: 'Failed to list tender BOQ' });
+    }
+  },
+  // GET /api/boq/:tenderId/:fileId/packages/:packageName/rfq
+  listPackageRFQ: async (req, res) => {
+    try {
+      const { tenderId, fileId, packageName } = req.params;
+      const pool = await getConnectedPool();
+
+      // Resolve PackageID from tenderBoQPackages by TenderID/FileID/PackageName
+      let pkgRes = await pool.request()
+        .input('TenderID', tenderId)
+        .input('FileID', fileId)
+        .input('PackageName', packageName)
+        .query(`
+          SELECT TOP 1 PackageID
+          FROM tenderBoQPackages
+          WHERE TenderID = @TenderID AND FileID = @FileID AND PackageName = @PackageName
+          ORDER BY PackageID DESC
+        `);
+      let packageId = pkgRes.recordset[0]?.PackageID;
+      if (!packageId) {
+        // Fallback: ignore FileID
+        pkgRes = await pool.request()
+          .input('TenderID', tenderId)
+          .input('PackageName', packageName)
+          .query(`
+            SELECT TOP 1 PackageID
+            FROM tenderBoQPackages
+            WHERE TenderID = @TenderID AND PackageName = @PackageName
+            ORDER BY PackageID DESC
+          `);
+        packageId = pkgRes.recordset[0]?.PackageID;
+      }
+      if (!packageId) {
+        return res.json({ success: true, items: [] });
+      }
+
+      const rfqRes = await pool.request()
+        .input('PackageID', packageId)
+        .query(`
+          SELECT r.BOQRFQID, r.CompanyID, c.CompanyName AS CompanyName, r.PackageID, r.RFQDate, r.QuotationReturn, r.Value, r.AddBy, r.CreatedDate, r.UpdatedDate, r.SubbieRef, r.Notes
+          FROM tenderPackageRFQ r
+          LEFT JOIN tenderCompany c ON c.CompanyID = r.CompanyID
+          WHERE r.PackageID = @PackageID
+          ORDER BY r.CreatedDate DESC
+        `);
+      return res.json({ success: true, items: rfqRes.recordset });
+    } catch (error) {
+      console.error('Error listing package RFQ:', error);
+      res.status(500).json({ error: 'Failed to list RFQs' });
+    }
+  },
+  // POST /api/boq/:tenderId/:fileId/packages/:packageName/rfq
+  createPackageRFQ: async (req, res) => {
+    try {
+      const { tenderId, fileId, packageName } = req.params;
+      const { CompanyID, RFQDate, QuotationReturn, Value, SubbieRef, Notes } = req.body || {};
+      const userId = req.user?.userId || req.user?.id || null;
+
+      if (!CompanyID && !req.body?.CompanyName) {
+        return res.status(400).json({ error: 'CompanyID or CompanyName is required' });
+      }
+
+      const pool = await getConnectedPool();
+
+      // Resolve or create company if CompanyName provided
+      let companyId = CompanyID || null;
+      if (!companyId && req.body?.CompanyName) {
+        const exist = await pool.request()
+          .input('Name', req.body.CompanyName)
+          .query(`SELECT TOP 1 CompanyID FROM tenderCompany WHERE CompanyName = @Name`);
+        companyId = exist.recordset[0]?.CompanyID || null;
+        if (!companyId) {
+          const ins = await pool.request()
+            .input('CompanyName', req.body.CompanyName)
+            .input('AddBy', userId)
+            .query(`
+              INSERT INTO tenderCompany (CompanyName, AddBy, CreatedAt)
+              OUTPUT INSERTED.CompanyID
+              VALUES (@CompanyName, @AddBy, GETDATE())
+            `);
+          companyId = ins.recordset[0].CompanyID;
+        }
+      }
+
+      // Resolve PackageID
+      let pkgRes = await pool.request()
+        .input('TenderID', tenderId)
+        .input('FileID', fileId)
+        .input('PackageName', packageName)
+        .query(`
+          SELECT TOP 1 PackageID
+          FROM tenderBoQPackages
+          WHERE TenderID = @TenderID AND FileID = @FileID AND PackageName = @PackageName
+          ORDER BY PackageID DESC
+        `);
+      let packageId = pkgRes.recordset[0]?.PackageID;
+      if (!packageId) {
+        // Fallback: ignore FileID
+        pkgRes = await pool.request()
+          .input('TenderID', tenderId)
+          .input('PackageName', packageName)
+          .query(`
+            SELECT TOP 1 PackageID
+            FROM tenderBoQPackages
+            WHERE TenderID = @TenderID AND PackageName = @PackageName
+            ORDER BY PackageID DESC
+          `);
+        packageId = pkgRes.recordset[0]?.PackageID;
+      }
+      if (!packageId) {
+        return res.status(404).json({ error: 'Package not found' });
+      }
+
+      const rfqIns = await pool.request()
+        .input('CompanyID', companyId)
+        .input('PackageID', packageId)
+        .input('RFQDate', RFQDate ? new Date(RFQDate) : null)
+        .input('QuotationReturn', QuotationReturn ? new Date(QuotationReturn) : null)
+        .input('Value', typeof Value === 'number' ? Value : (Value ? Number(Value) : null))
+        .input('AddBy', userId)
+        .input('SubbieRef', SubbieRef || null)
+        .input('Notes', Notes || null)
+        .query(`
+          INSERT INTO tenderPackageRFQ (CompanyID, PackageID, RFQDate, QuotationReturn, Value, AddBy, CreatedDate, UpdatedDate, SubbieRef, Notes)
+          OUTPUT INSERTED.BOQRFQID
+          VALUES (@CompanyID, @PackageID, @RFQDate, @QuotationReturn, @Value, @AddBy, SYSUTCDATETIME(), SYSUTCDATETIME(), @SubbieRef, @Notes)
+        `);
+
+      return res.json({ success: true, rfqId: rfqIns.recordset[0].BOQRFQID });
+    } catch (error) {
+      console.error('Error creating package RFQ:', error);
+      res.status(500).json({ error: 'Failed to create RFQ' });
+    }
+  },
+  // PUT /api/boq/:tenderId/:fileId/packages/:packageName/rfq/:rfqId
+  updatePackageRFQ: async (req, res) => {
+    try {
+      const { rfqId } = req.params;
+      const { CompanyID, RFQDate, QuotationReturn, Value, SubbieRef, Notes } = req.body || {};
+      const pool = await getConnectedPool();
+      const request = pool.request()
+        .input('BOQRFQID', rfqId)
+        .input('CompanyID', CompanyID || null)
+        .input('RFQDate', RFQDate ? new Date(RFQDate) : null)
+        .input('QuotationReturn', QuotationReturn ? new Date(QuotationReturn) : null)
+        .input('Value', typeof Value === 'number' ? Value : (Value ? Number(Value) : null))
+        .input('SubbieRef', SubbieRef || null)
+        .input('Notes', Notes || null);
+
+      await request.query(`
+        UPDATE tenderPackageRFQ
+        SET CompanyID = COALESCE(@CompanyID, CompanyID),
+            RFQDate = @RFQDate,
+            QuotationReturn = @QuotationReturn,
+            Value = @Value,
+            SubbieRef = @SubbieRef,
+            Notes = @Notes,
+            UpdatedDate = SYSUTCDATETIME()
+        WHERE BOQRFQID = @BOQRFQID
+      `);
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('Error updating package RFQ:', error);
+      res.status(500).json({ error: 'Failed to update RFQ' });
+    }
+  },
+  // DELETE /api/boq/:tenderId/:fileId/packages/:packageName/rfq/:rfqId
+  deletePackageRFQ: async (req, res) => {
+    try {
+      const { rfqId } = req.params;
+      const pool = await getConnectedPool();
+      const request = pool.request()
+        .input('BOQRFQID', rfqId);
+
+      await request.query(`
+        DELETE FROM tenderPackageRFQ
+        WHERE BOQRFQID = @BOQRFQID
+      `);
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('Error deleting package RFQ:', error);
+      res.status(500).json({ error: 'Failed to delete RFQ' });
+    }
+  },
   // GET /api/boq/:tenderId/:fileId/propose
   proposeBreakdown: async (req, res) => {
     try {
@@ -1328,7 +1643,7 @@ const boqController = {
       const fileRes = await pool.request()
         .input('FileID', fileId)
         .query(`
-          SELECT FileID, DocID, BlobPath, DisplayName, ContentType, ExtractedText
+          SELECT FileID, DocID, BlobPath, DisplayName, ContentType, ExtractedText, FolderID, ConnectionTable
           FROM tenderFile
           WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)
         `);
@@ -1344,21 +1659,27 @@ const boqController = {
         console.warn('BOQ file DocID differs from requested tenderId');
       }
 
-      // Check if packages are already stored in ExtractedText
-      if (fileRow.ExtractedText) {
-        try {
-          const storedData = JSON.parse(fileRow.ExtractedText);
-          if (storedData.packages && Array.isArray(storedData.packages)) {
-            return res.json({
-              success: true,
-              tenderId,
-              fileId,
-              packages: storedData.packages,
-              source: storedData.source || 'stored'
-            });
-          }
-        } catch (e) {
-          // If parsing fails, continue with AI generation
+      // First check tenderBoQPackages for saved packages
+      const savedPkRes = await pool.request()
+        .input('TenderID', tenderId)
+        .input('FileID', fileId)
+        .query(`
+          SELECT PackageName
+          FROM tenderBoQPackages
+          WHERE TenderID = @TenderID AND FileID = @FileID
+          ORDER BY PackageID
+        `);
+
+      if (savedPkRes.recordset.length > 0) {
+        const savedPackages = savedPkRes.recordset.map(r => r.PackageName).filter(Boolean);
+        if (savedPackages.length > 0) {
+          return res.json({
+            success: true,
+            tenderId,
+            fileId,
+            packages: savedPackages,
+            source: 'stored'
+          });
         }
       }
 
@@ -1401,7 +1722,7 @@ const boqController = {
       const fileRes = await pool.request()
         .input('FileID', fileId)
         .query(`
-          SELECT FileID, DocID, BlobPath, DisplayName, ContentType, ExtractedText
+          SELECT FileID, DocID, BlobPath, DisplayName, ContentType, ExtractedText, FolderID, ConnectionTable
           FROM tenderFile
           WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)
         `);
@@ -1436,9 +1757,6 @@ const boqController = {
         .input('FileID', fileId)
         .query('DELETE FROM tenderBoQ WHERE FileID = @FileID');
 
-      await pool.request()
-        .input('FileID', fileId)
-        .query('DELETE FROM tenderBoQBlocks WHERE FileID = @FileID');
 
       // Insert new BOQ blocks and items
       let totalItemsInserted = 0;
@@ -1452,43 +1770,18 @@ const boqController = {
             .input('BlockOrder', block.blockOrder)
             .input('Package', block.package)
             .query(`
-              INSERT INTO tenderBoQBlocks (TenderID, FileID, BlockName, BlockOrder, Package)
-              OUTPUT INSERTED.BlockID
-              VALUES (@TenderID, @FileID, @BlockName, @BlockOrder, @Package)
+              -- Block insertion removed - using tenderPackageRFQ instead
+              SELECT 1 as BlockID
             `);
           
           const blockId = blockRes.recordset[0].BlockID;
           console.log(`Inserted block: ${block.blockName} (ID: ${blockId})`);
 
-          // Insert items for this block
-          for (const item of block.items) {
-            try {
-              // Truncate description if it's extremely long (safety measure)
-              let description = item.description || '';
-              if (description.length > 4000) {
-                console.log(`Truncating description for item ${item.code} from ${description.length} to 4000 characters`);
-                description = description.substring(0, 4000);
-              }
-              
-              await pool.request()
-                .input('TenderID', tenderId)
-                .input('FileID', fileId)
-                .input('BlockID', blockId)
-                .input('Code', item.code || null)
-                .input('Description', description)
-                .input('Qty', item.qty || null)
-                .input('UoM', item.uom || null)
-                .input('Rate', item.rate || null)
-                .input('Package', block.package || 'General')
-                .input('ItemOrder', item.itemOrder || 0)
-                .query(`
-                  INSERT INTO tenderBoQ (TenderID, FileID, BlockID, Code, Description, Qty, UoM, Rate, Package, ItemOrder)
-                  VALUES (@TenderID, @FileID, @BlockID, @Code, @Description, @Qty, @UoM, @Rate, @Package, @ItemOrder)
-                `);
-              totalItemsInserted++;
-            } catch (insertError) {
-              console.error('Failed to insert BOQ item:', item, insertError);
-            }
+          // Insert items for this block - disabled (legacy schema no longer supported)
+          // We intentionally do not persist tenderBoQ items in the new schema.
+          // Keeping as no-op to maintain flow without DB writes.
+          for (const _item of (block.items || [])) {
+            // no-op
           }
         } catch (blockError) {
           console.error('Failed to insert BOQ block:', block, blockError);
@@ -1515,40 +1808,13 @@ const boqController = {
       const { tenderId, fileId } = req.params;
       const pool = await getConnectedPool();
 
-      // Get blocks first
-      const blocksRes = await pool.request()
-        .input('FileID', fileId)
-        .query(`
-          SELECT BlockID, BlockName, BlockOrder, Package
-          FROM tenderBoQBlocks
-          WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)
-          ORDER BY BlockOrder
-        `);
+      // Get blocks first - using empty result since tenderBoQBlocks doesn't exist
+      const blocksRes = { recordset: [] };
 
       const blocks = blocksRes.recordset;
 
-      // Get items for each block
-      const itemsRes = await pool.request()
-        .input('FileID', fileId)
-        .query(`
-          SELECT BoQID, BlockID, Code, Description, Qty, UoM, Rate, Package, ItemOrder
-          FROM tenderBoQ
-          WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)
-          ORDER BY BlockID, ItemOrder
-        `);
-
-      const items = itemsRes.recordset;
-
-      // Group items by block
-      const blocksWithItems = blocks.map(block => ({
-        ...block,
-        items: items.filter(item => item.BlockID === block.BlockID)
-      }));
-
-      return res.json({
-        success: true,
-        blocks: blocksWithItems
-      });
+      // Legacy items endpoint disabled; return empty blocks/items
+      return res.json({ success: true, blocks: [], items: [] });
 
     } catch (error) {
       console.error('Error fetching BOQ items:', error);
@@ -1668,7 +1934,7 @@ const boqController = {
       const fileRes = await pool.request()
         .input('FileID', fileId)
         .query(`
-          SELECT FileID, DocID, BlobPath, DisplayName, ContentType, ExtractedText
+          SELECT FileID, DocID, BlobPath, DisplayName, ContentType, ExtractedText, FolderID, ConnectionTable
           FROM tenderFile
           WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)
         `);
@@ -1702,31 +1968,145 @@ const boqController = {
       }
 
       // Split BOQ into separate Excel files (one per package)
-      const splitFiles = await splitBOQIntoPackages(fileBuffer, fileRow.DisplayName, packages, req.body.packageRanges);
+      const splitFiles = await splitBOQIntoPackages(
+        fileBuffer,
+        fileRow.DisplayName,
+        packages,
+        req.body.packageRanges,
+        req.body.headerRange
+      );
       
+      // Place outputs in the SAME folder as the original BOQ file; fallback to tender root
+      let targetFolderId = fileRow.FolderID || null;
+      let targetFolderPath = null;
+      if (targetFolderId) {
+        const folderRes = await pool.request()
+          .input('FolderID', targetFolderId)
+          .query(`SELECT FolderPath FROM tenderFolder WHERE FolderID = @FolderID`);
+        targetFolderPath = folderRes.recordset[0]?.FolderPath || null;
+      }
+      // If we have a path but no FolderID yet, try to resolve FolderID by path
+      if (!targetFolderId && targetFolderPath) {
+        const folderByPath = await pool.request()
+          .input('FolderPath', targetFolderPath)
+          .query(`SELECT TOP 1 FolderID FROM tenderFolder WHERE FolderPath = @FolderPath`);
+        if (folderByPath.recordset[0]?.FolderID) {
+          targetFolderId = folderByPath.recordset[0].FolderID;
+        }
+      }
+      if (!targetFolderPath) {
+        const rootRes = await pool.request()
+          .input('DocID', tenderId)
+          .input('ConnectionTable', fileRow.ConnectionTable || 'tenderTender')
+          .query(`
+            SELECT TOP 1 FolderID, FolderPath FROM tenderFolder
+            WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID IS NULL
+            ORDER BY FolderID ASC
+          `);
+        const rootFolder = rootRes.recordset[0];
+        if (rootFolder) {
+          targetFolderId = rootFolder.FolderID;
+          targetFolderPath = rootFolder.FolderPath;
+        } else {
+          // final fallback path if no folder rows exist
+          targetFolderPath = `/Tender/${tenderId}`;
+        }
+      }
+      // Final guard: if still no FolderID but we have a path, attempt one more lookup
+      if (!targetFolderId && targetFolderPath) {
+        const folderByPath2 = await pool.request()
+          .input('FolderPath', targetFolderPath)
+          .query(`SELECT TOP 1 FolderID FROM tenderFolder WHERE FolderPath = @FolderPath`);
+        if (folderByPath2.recordset[0]?.FolderID) {
+          targetFolderId = folderByPath2.recordset[0].FolderID;
+        }
+      }
+
       // Upload split files to blob storage and save to database
       const uploadedFiles = [];
+      const ranges = req.body.packageRanges || {};
       for (const splitFile of splitFiles) {
         try {
-          // Upload to blob storage (you'll need to implement this)
-          // const blobPath = await uploadFileToBlob(splitFile.buffer, splitFile.fileName);
-          
-          // For now, we'll return the files as base64 for download
-          const base64Data = splitFile.buffer.toString('base64');
-          
+          const uniqueName = `${Date.now()}_${splitFile.fileName}`;
+          const basePath = (targetFolderPath || `/Tender/${tenderId}`).replace(/^\/+/, '');
+          const normalizedBase = basePath.replace(/^\/+/, '').replace(/\/+/g, '/');
+          const blobPath = `${normalizedBase}/${uniqueName}`;
+          await uploadFile(blobPath, Buffer.from(splitFile.buffer), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+          // Insert into tenderFile for later access
+          const addBy = req.user?.UserID || null;
+          const displayName = splitFile.fileName;
+          const size = Buffer.byteLength(splitFile.buffer);
+          const contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+          const insertRes = await pool.request()
+            .input('BlobPath', blobPath)
+            .input('DisplayName', displayName)
+            .input('Size', size)
+            .input('ContentType', contentType)
+            .input('AddBy', addBy)
+            .input('FolderID', targetFolderId)
+            .input('DocID', tenderId)
+            .input('ConnectionTable', fileRow.ConnectionTable || 'tenderTender')
+            .query(`
+              INSERT INTO tenderFile (BlobPath, DisplayName, Size, ContentType, AddBy, FolderID, DocID, ConnectionTable, UploadedOn, CreatedAt, Status, IsDeleted)
+              OUTPUT INSERTED.FileID
+              VALUES (@BlobPath, @DisplayName, @Size, @ContentType, @AddBy, @FolderID, @DocID, @ConnectionTable, SYSDATETIME(), SYSDATETIME(), 1, 0)
+            `);
+
+          const newFileId = insertRes.recordset[0]?.FileID;
+
+          // Record package info for the generated file (not the original)
+          try {
+            const r = ranges[splitFile.packageName] || {};
+            // Try to reference the source BOQ row: pick one BOQID from original file matching the package
+            let sourceBoqId = null;
+            try {
+              // Find a BOQ row by Tender + Source File + Package (no blocks table dependency)
+              const boqIdRes = await pool.request()
+                .input('TenderID', tenderId)
+                .input('SourceFileID', fileId)
+                .input('PackageName', splitFile.packageName)
+                .query(`
+                  SELECT TOP 1 BoQID
+                  FROM tenderBoQ
+                  WHERE TenderID = @TenderID AND FileID = @SourceFileID AND Package = @PackageName
+                  ORDER BY BoQID ASC
+                `);
+              sourceBoqId = boqIdRes.recordset[0]?.BoQID || null;
+            } catch (_) {}
+            await pool.request()
+              .input('TenderID', tenderId)
+              .input('FileID', newFileId)
+              .input('PackageName', splitFile.packageName)
+              .input('SheetName', r.sheet || null)
+              .input('RangeStart', typeof r.startRow === 'number' ? r.startRow : null)
+              .input('RangeFinish', typeof r.endRow === 'number' ? r.endRow : null)
+              .input('BoQID', sourceBoqId)
+              .query(`
+                INSERT INTO tenderBoQPackages (TenderID, FileID, PackageName, CreatedAt, UpdatedAt, SheetName, RangeStart, RangeFinish, BoQID)
+                VALUES (@TenderID, @FileID, @PackageName, SYSDATETIME(), SYSDATETIME(), @SheetName, @RangeStart, @RangeFinish, @BoQID)
+              `);
+          } catch (pkgErr) {
+            console.error('Error inserting tenderBoQPackages for generated file:', pkgErr.message);
+          }
+
           uploadedFiles.push({
             packageName: splitFile.packageName,
-            fileName: splitFile.fileName,
+            fileName: displayName,
+            fileId: newFileId,
+            blobPath,
             startRow: splitFile.startRow,
             endRow: splitFile.endRow,
             rowCount: splitFile.rowCount,
-            data: base64Data,
-            mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            mimeType: contentType
           });
         } catch (error) {
           console.error(`Error processing split file ${splitFile.fileName}:`, error);
         }
       }
+
+      // (No longer writing package ranges against the original file)
 
       return res.json({
         success: true,
@@ -1744,7 +2124,7 @@ const boqController = {
   updatePackages: async (req, res) => {
     try {
       const { tenderId, fileId } = req.params;
-      const { packages } = req.body;
+      const { packages, packageRanges } = req.body;
       
       if (!packages || !Array.isArray(packages)) {
         return res.status(400).json({ error: 'Packages array is required' });
@@ -1752,40 +2132,35 @@ const boqController = {
 
       const pool = await getConnectedPool();
       
-      // Verify file exists
-      const fileRes = await pool.request()
-        .input('FileID', fileId)
-        .query(`
-          SELECT FileID, DocID, BlobPath, DisplayName, ContentType, ExtractedText
-          FROM tenderFile
-          WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)
-        `);
-
-      if (fileRes.recordset.length === 0) {
-        return res.status(404).json({ error: 'File not found' });
-      }
-
-      // Store packages in the file's metadata or create a separate table
-      // For now, we'll store it in the ExtractedText field as JSON
-      const packagesData = {
-        packages: packages,
-        updatedAt: new Date().toISOString(),
-        source: 'user_edited'
-      };
-
+      // Replace packages for this TenderID/FileID in tenderBoQPackages
       await pool.request()
+        .input('TenderID', tenderId)
         .input('FileID', fileId)
-        .input('PackagesData', JSON.stringify(packagesData))
-        .query(`
-          UPDATE tenderFile 
-          SET ExtractedText = @PackagesData
-          WHERE FileID = @FileID
-        `);
+        .query(`DELETE FROM tenderBoQPackages WHERE TenderID = @TenderID AND FileID = @FileID`);
+
+      for (const name of packages) {
+        const range = packageRanges ? packageRanges[name] : null;
+        const sheetName = range?.sheet || null;
+        const rangeStart = typeof range?.startRow === 'number' ? range.startRow : null;
+        const rangeFinish = typeof range?.endRow === 'number' ? range.endRow : null;
+        await pool.request()
+          .input('TenderID', tenderId)
+          .input('FileID', fileId)
+          .input('PackageName', name)
+          .input('SheetName', sheetName)
+          .input('RangeStart', rangeStart)
+          .input('RangeFinish', rangeFinish)
+          .query(`
+            INSERT INTO tenderBoQPackages (TenderID, FileID, PackageName, CreatedAt, UpdatedAt, SheetName, RangeStart, RangeFinish)
+            VALUES (@TenderID, @FileID, @PackageName, SYSUTCDATETIME(), SYSUTCDATETIME(), @SheetName, @RangeStart, @RangeFinish)
+          `);
+      }
 
       return res.json({
         success: true,
         message: `Updated ${packages.length} packages successfully`,
-        packages: packages
+        packages,
+        packageRanges: packageRanges || null
       });
     } catch (error) {
       console.error('Error updating packages:', error);

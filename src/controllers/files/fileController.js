@@ -84,7 +84,23 @@ const fileController = {
 
             console.log('Processed folders:', rootFolders);
 
-            res.json({ folders: rootFolders });
+            // Return all folders in a flat structure for frontend filtering
+            const allFolders = Object.values(folderMap).map(folder => ({
+                id: folder.id,
+                name: folder.name,
+                path: folder.path,
+                parentFolderId: folder.parentId,
+                folderType: folder.type,
+                displayOrder: folder.displayOrder,
+                isActive: folder.isActive,
+                createdAt: folder.createdAt,
+                updatedAt: folder.updatedAt,
+                docId: folder.docId,
+                connectionTable: folder.connectionTable,
+                createdBy: folder.createdBy
+            }));
+
+            res.json({ folders: allFolders });
         } catch (error) {
             console.error('Error getting folders:', error);
             res.status(500).json({ message: 'Failed to get folders' });
@@ -413,7 +429,7 @@ const fileController = {
         }
     },
 
-    // Delete folder (only user-created folders, not if files exist inside)
+    // Delete folder (only user-created folders). Deletes all files inside first; still blocks if subfolders exist
     deleteFolder: async (req, res) => {
         try {
             const { folderId } = req.params;
@@ -464,20 +480,35 @@ const fileController = {
                 });
             }
 
-            // Check if folder has any files
-            const filesResult = await pool.request()
+            // Load all files inside this folder for this user and delete them first
+            const filesInFolder = await pool.request()
                 .input('FolderID', folderId)
+                .input('UserID', userId)
                 .query(`
-                    SELECT COUNT(*) as FileCount
-                    FROM tenderFile 
-                    WHERE FolderID = @FolderID AND IsDeleted = 0
+                    SELECT FileID, BlobPath, DisplayName
+                    FROM tenderFile
+                    WHERE FolderID = @FolderID AND AddBy = @UserID AND IsDeleted = 0
                 `);
 
-            const fileCount = filesResult.recordset[0].FileCount;
-            if (fileCount > 0) {
-                return res.status(400).json({ 
-                    message: `Cannot delete folder. It contains ${fileCount} file(s). Please delete all files first.` 
-                });
+            let deletedFiles = 0;
+            for (const f of filesInFolder.recordset) {
+                try {
+                    if (f.BlobPath) {
+                        const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
+                        await deleteBlobFile(f.BlobPath);
+                    }
+                } catch (blobErr) {
+                    console.warn('Warning: Failed to delete file from blob storage during folder delete:', blobErr?.message);
+                }
+
+                await pool.request()
+                    .input('FileID', f.FileID)
+                    .input('UserID', userId)
+                    .query(`
+                        DELETE FROM tenderFile
+                        WHERE FileID = @FileID AND AddBy = @UserID
+                    `);
+                deletedFiles += 1;
             }
 
             // Check if folder has any subfolders
@@ -508,7 +539,8 @@ const fileController = {
 
             res.json({
                 message: 'Folder deleted successfully',
-                folderName: folder.FolderName
+                folderName: folder.FolderName,
+                deletedFiles
             });
 
         } catch (error) {
@@ -521,6 +553,12 @@ const fileController = {
     getFilesByDocument: async (req, res) => {
         try {
             const { docId, connectionTable } = req.params;
+            
+            // Validate parameters
+            if (!docId || docId === 'undefined' || !connectionTable || connectionTable === 'undefined') {
+                return res.json({ files: [] });
+            }
+            
             const pool = await getConnectedPool();
             const userId = req.user.UserID;
 
@@ -590,7 +628,7 @@ ORDER BY f.CreatedAt DESC;
             const result = await pool.request()
                 .input('UserID', userId)
                 .query(`
-                    SELECT 
+                    SELECT TOP 10
                         f.FileID,
                         f.DisplayName,
                         f.BlobPath,
@@ -920,13 +958,110 @@ ORDER BY f.CreatedAt DESC;
                 }
             }
 
-            // Validate required fields after fallback
+            // Special handling: RFQ attachments should go to Tender's BOQ folder
+            try {
+                if (connectionTable && connectionTable.toLowerCase() === 'dbo.tenderpackagerfq' && docId) {
+                    // Resolve TenderID from RFQ -> Package -> tenderBoQPackages
+                    const rfqLookup = await pool.request()
+                        .input('BOQRFQID', parseInt(docId))
+                        .query(`
+                            SELECT TOP 1 p.TenderID
+                            FROM tenderPackageRFQ r
+                            JOIN tenderBoQPackages p ON r.PackageID = p.PackageID
+                            WHERE r.BOQRFQID = @BOQRFQID
+                        `);
+                    const rfqTenderId = rfqLookup.recordset[0]?.TenderID || null;
+                    if (rfqTenderId) {
+                        const boqFolder = await pool.request()
+                            .input('TenderID', rfqTenderId)
+                            .query(`
+                                SELECT TOP 1 tf.FolderID
+                                FROM tenderFolder tf
+                                WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.FolderName = 'BOQ'
+                            `);
+                        if (boqFolder.recordset.length > 0) {
+                            folderId = boqFolder.recordset[0].FolderID;
+                        } else {
+                            // Try to resolve the tender root and then create/find BOQ subfolder
+                            const tenderRoot = await pool.request()
+                                .input('TenderID', rfqTenderId)
+                                .query(`
+                                    SELECT TOP 1 tf.FolderID, tf.FolderPath
+                                    FROM tenderFolder tf
+                                    WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.ParentFolderID = 2
+                                `);
+                            const tenderRootId = tenderRoot.recordset?.[0]?.FolderID || null;
+                            const tenderRootPath = tenderRoot.recordset?.[0]?.FolderPath || null;
+                            if (tenderRootId) {
+                                // Check for existing BOQ subfolder under tender root
+                                const existingBoq = await pool.request()
+                                    .input('ParentFolderID', tenderRootId)
+                                    .query(`
+                                        SELECT TOP 1 FolderID FROM tenderFolder WHERE ParentFolderID = @ParentFolderID AND FolderName = 'BOQ'
+                                    `);
+                                if (existingBoq.recordset.length > 0) {
+                                    folderId = existingBoq.recordset[0].FolderID;
+                                } else if (tenderRootPath) {
+                                    // Create BOQ subfolder
+                                    const insertBoq = await pool.request()
+                                        .input('FolderName', 'BOQ')
+                                        .input('FolderPath', `${tenderRootPath}/BOQ`)
+                                        .input('FolderType', 'sub')
+                                        .input('ParentFolderID', tenderRootId)
+                                        .input('AddBy', userId)
+                                        .input('DocID', rfqTenderId)
+                                        .input('ConnectionTable', 'tenderTender')
+                                        .query(`
+                                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                                            OUTPUT INSERTED.FolderID
+                                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                                        `);
+                                    folderId = insertBoq.recordset[0].FolderID;
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (rfqFolderErr) {
+                console.warn('Warning: failed to resolve BOQ folder for RFQ upload:', rfqFolderErr?.message);
+            }
+
+            // Validate required fields after fallback and RFQ resolution
             // Only require docId and connectionTable if we're in a specific context (tender/RFI)
             // For general uploads, these can be null
             if (!folderId) {
-                return res.status(400).json({ 
-                    message: 'Missing required field: folderId' 
-                });
+                // As a last resort, if RFQ context couldn't resolve a folder, try find BOQ by TenderID from RFQ again
+                try {
+                    if (connectionTable && connectionTable.toLowerCase() === 'dbo.tenderpackagerfq' && docId) {
+                        const rfqLookup2 = await pool.request()
+                            .input('BOQRFQID', parseInt(docId))
+                            .query(`
+                                SELECT TOP 1 p.TenderID
+                                FROM tenderPackageRFQ r
+                                JOIN tenderBoQPackages p ON r.PackageID = p.PackageID
+                                WHERE r.BOQRFQID = @BOQRFQID
+                            `);
+                        const rfqTenderId2 = rfqLookup2.recordset[0]?.TenderID || null;
+                        if (rfqTenderId2) {
+                            const boqFolder2 = await pool.request()
+                                .input('TenderID', rfqTenderId2)
+                                .query(`
+                                    SELECT TOP 1 tf.FolderID
+                                    FROM tenderFolder tf
+                                    WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.FolderName = 'BOQ'
+                                `);
+                            if (boqFolder2.recordset.length > 0) {
+                                folderId = boqFolder2.recordset[0].FolderID;
+                            }
+                        }
+                    }
+                } catch (_) {}
+
+                if (!folderId) {
+                    return res.status(400).json({ 
+                        message: 'Missing required field: folderId (failed to resolve BOQ folder for RFQ upload)' 
+                    });
+                }
             }
             
             // If we have a tenderId or rfiId, we should have docId and connectionTable
@@ -975,6 +1110,23 @@ ORDER BY f.CreatedAt DESC;
 
             const fileId = result.recordset[0].FileID;
             console.log('File saved to database with ID:', fileId);
+
+            // If uploaded into Tender > BOQ, create tenderBoQ row per new schema
+            try {
+                if (connectionTable === 'tenderTender' && docId) {
+                    await pool.request()
+                        .input('TenderID', parseInt(docId))
+                        .input('FileID', parseInt(fileId))
+                        .input('UploadedAt', new Date())
+                        .input('Description', metadata?.title || originalname)
+                        .query(`
+                            INSERT INTO tenderBoQ (TenderID, FileID, UploadedAt, Description)
+                            VALUES (@TenderID, @FileID, @UploadedAt, @Description)
+                        `);
+                }
+            } catch (boqErr) {
+                console.error('Failed to insert tenderBoQ record:', boqErr.message);
+            }
 
             // Upload to Azure Blob Storage
             try {
@@ -1339,69 +1491,251 @@ ORDER BY f.CreatedAt DESC;
         }
     },
 
-    // New endpoint for searching through file content
+    // Enhanced comprehensive search across all file metadata
     searchFiles: async (req, res) => {
         try {
-            const { query } = req.query;
+            const { query, limit = 50 } = req.query;
             const pool = await getConnectedPool();
             const userId = req.user.UserID;
 
             if (!query || query.trim().length < 2) {
-                return res.status(400).json({ message: 'Search query must be at least 2 characters long' });
+                return res.json({ files: [], folders: [], totalResults: 0, query: '' });
             }
 
-            const result = await pool.request()
+            const searchTerm = `%${query.trim()}%`;
+            const searchTermExact = query.trim();
+
+            // Enhanced search files with comprehensive metadata and relevance scoring
+            const filesResult = await pool.request()
                 .input('UserID', userId)
-                .input('SearchQuery', `%${query.trim()}%`)
+                .input('SearchTerm', searchTerm)
+                .input('SearchTermExact', searchTermExact)
+                .input('Limit', parseInt(limit))
                 .query(`
-                    SELECT
+                    SELECT TOP (@Limit)
                         f.FileID,
                         f.DisplayName,
+                        f.BlobPath,
+                        f.UploadedOn,
                         f.Size,
                         f.ContentType,
-                        f.UploadedOn,
-                        f.AddBy,
-                        f.FolderID,
+                        f.Status,
+                        f.CreatedAt,
+                        f.UpdatedAt,
                         f.DocID,
                         f.ConnectionTable,
                         f.Metadata,
                         f.ExtractedText,
-                        u.Name as AddedByName
+                        u.Name as UploadedBy,
+                        tf.FolderID,
+                        tf.FolderName,
+                        tf.FolderPath,
+                        CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred,
+                        -- Enhanced relevance scoring (normalized to 0-100)
+                        CASE 
+                            WHEN f.DisplayName LIKE @SearchTermExact THEN 100
+                            WHEN f.DisplayName LIKE @SearchTerm THEN 80
+                            WHEN f.ContentType LIKE @SearchTerm THEN 60
+                            WHEN f.Metadata LIKE @SearchTerm THEN 50
+                            WHEN f.ExtractedText LIKE @SearchTerm THEN 45
+                            WHEN u.Name LIKE @SearchTerm THEN 30
+                            WHEN tf.FolderName LIKE @SearchTerm THEN 25
+                            WHEN tf.FolderPath LIKE @SearchTerm THEN 15
+                            WHEN CONVERT(VARCHAR, f.UploadedOn, 23) LIKE @SearchTerm THEN 20
+                            WHEN CONVERT(VARCHAR, f.CreatedAt, 23) LIKE @SearchTerm THEN 20
+                            WHEN CONVERT(VARCHAR, f.UploadedOn, 120) LIKE @SearchTerm THEN 15
+                            WHEN CONVERT(VARCHAR, f.CreatedAt, 120) LIKE @SearchTerm THEN 15
+                            WHEN CAST(f.Size AS VARCHAR) LIKE @SearchTerm THEN 10
+                            ELSE 0
+                        END as RelevanceScore
                     FROM tenderFile f
                     LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
-                    WHERE f.AddBy = @UserID 
-                        AND f.IsDeleted = 0
-                        AND (
-                            f.DisplayName LIKE @SearchQuery
-                            OR f.ExtractedText LIKE @SearchQuery
-                            OR f.Metadata LIKE @SearchQuery
-                        )
-                    ORDER BY f.UploadedOn DESC
+                    LEFT JOIN tenderFolder tf ON f.FolderID = tf.FolderID
+                    LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+                    WHERE f.IsDeleted = 0 AND f.AddBy = @UserID
+                    AND (
+                        f.DisplayName LIKE @SearchTerm OR
+                        f.ContentType LIKE @SearchTerm OR
+                        f.Metadata LIKE @SearchTerm OR
+                        f.ExtractedText LIKE @SearchTerm OR
+                        u.Name LIKE @SearchTerm OR
+                        tf.FolderName LIKE @SearchTerm OR
+                        tf.FolderPath LIKE @SearchTerm OR
+                        -- Date search (supports various formats)
+                        CONVERT(VARCHAR, f.UploadedOn, 23) LIKE @SearchTerm OR
+                        CONVERT(VARCHAR, f.CreatedAt, 23) LIKE @SearchTerm OR
+                        CONVERT(VARCHAR, f.UploadedOn, 120) LIKE @SearchTerm OR
+                        CONVERT(VARCHAR, f.CreatedAt, 120) LIKE @SearchTerm OR
+                        -- Size search
+                        CAST(f.Size AS VARCHAR) LIKE @SearchTerm
+                    )
+                    ORDER BY RelevanceScore DESC, f.UploadedOn DESC
                 `);
 
-            const files = result.recordset.map(file => ({
+            // Search folders with relevance scoring
+            const foldersResult = await pool.request()
+                .input('UserID', userId)
+                .input('SearchTerm', searchTerm)
+                .input('SearchTermExact', searchTermExact)
+                .query(`
+                    SELECT 
+                        tf.FolderID,
+                        tf.FolderName,
+                        tf.FolderPath,
+                        tf.ParentFolderID,
+                        tf.FolderType,
+                        tf.DisplayOrder,
+                        tf.IsActive,
+                        tf.CreatedAt,
+                        tf.UpdatedAt,
+                        tf.DocID,
+                        tf.ConnectionTable,
+                        tf.AddBy as CreatedBy,
+                        -- Calculate relevance score for folders (normalized to 0-100)
+                        CASE 
+                            WHEN tf.FolderName LIKE @SearchTermExact THEN 100
+                            WHEN tf.FolderName LIKE @SearchTerm THEN 80
+                            WHEN tf.FolderPath LIKE @SearchTerm THEN 60
+                            WHEN tf.FolderType LIKE @SearchTerm THEN 40
+                            WHEN CONVERT(VARCHAR, tf.CreatedAt, 23) LIKE @SearchTerm THEN 20
+                            WHEN CONVERT(VARCHAR, tf.UpdatedAt, 23) LIKE @SearchTerm THEN 20
+                            ELSE 0
+                        END as RelevanceScore
+                    FROM tenderFolder tf
+                    WHERE tf.IsActive = 1 AND tf.AddBy = @UserID
+                    AND (
+                        tf.FolderName LIKE @SearchTerm OR
+                        tf.FolderPath LIKE @SearchTerm OR
+                        tf.FolderType LIKE @SearchTerm OR
+                        CONVERT(VARCHAR, tf.CreatedAt, 23) LIKE @SearchTerm OR
+                        CONVERT(VARCHAR, tf.UpdatedAt, 23) LIKE @SearchTerm
+                    )
+                    ORDER BY RelevanceScore DESC, tf.CreatedAt DESC
+                `);
+
+            // Format files response
+            const files = filesResult.recordset.map(file => ({
                 fileId: file.FileID,
                 fileName: file.DisplayName,
                 size: file.Size,
                 contentType: file.ContentType,
                 uploadedOn: file.UploadedOn,
-                addedBy: file.AddedByName,
+                uploadedBy: file.UploadedBy,
                 folderId: file.FolderID,
+                folderName: file.FolderName,
+                folderPath: file.FolderPath,
                 docId: file.DocID,
                 connectionTable: file.ConnectionTable,
                 metadata: file.Metadata ? JSON.parse(file.Metadata) : null,
                 extractedText: file.ExtractedText,
-                hasText: !!file.ExtractedText
+                hasText: !!file.ExtractedText,
+                isStarred: file.isStarred,
+                relevanceScore: file.RelevanceScore
+            }));
+
+            // Format folders response
+            const folders = foldersResult.recordset.map(folder => ({
+                folderId: folder.FolderID,
+                folderName: folder.FolderName,
+                folderPath: folder.FolderPath,
+                parentFolderId: folder.ParentFolderID,
+                folderType: folder.FolderType,
+                createdAt: folder.CreatedAt,
+                updatedAt: folder.UpdatedAt,
+                docId: folder.DocID,
+                connectionTable: folder.ConnectionTable,
+                createdBy: folder.CreatedBy,
+                relevanceScore: folder.RelevanceScore
             }));
 
             res.json({ 
                 files,
-                searchQuery: query,
-                totalResults: files.length
+                folders,
+                totalResults: files.length + folders.length,
+                query: query.trim()
             });
+
         } catch (error) {
             console.error('Error searching files:', error);
             res.status(500).json({ message: 'Failed to search files' });
+        }
+    },
+
+    // Search files with custom SQL filter (for suggestions)
+    searchFilesWithFilter: async (req, res) => {
+        try {
+            const { sqlFilter } = req.body;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!sqlFilter) {
+                return res.status(400).json({ message: 'SQL filter is required' });
+            }
+
+            // Build the query with the custom filter
+            const query = `
+                SELECT TOP 50
+                    f.FileID,
+                    f.DisplayName,
+                    f.BlobPath,
+                    f.UploadedOn,
+                    f.Size,
+                    f.ContentType,
+                    f.Status,
+                    f.CreatedAt,
+                    f.UpdatedAt,
+                    f.DocID,
+                    f.ConnectionTable,
+                    f.Metadata,
+                    f.ExtractedText,
+                    u.Name as UploadedBy,
+                    tf.FolderID,
+                    tf.FolderName,
+                    tf.FolderPath,
+                    CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred,
+                    100 as RelevanceScore
+                FROM tenderFile f
+                LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                LEFT JOIN tenderFolder tf ON f.FolderID = tf.FolderID
+                LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+                WHERE f.IsDeleted = 0 AND f.AddBy = @UserID
+                ${sqlFilter}
+            `;
+
+            const filesResult = await pool.request()
+                .input('UserID', userId)
+                .query(query);
+
+            // Format files response
+            const files = filesResult.recordset.map(file => ({
+                fileId: file.FileID,
+                fileName: file.DisplayName,
+                size: file.Size,
+                contentType: file.ContentType,
+                uploadedOn: file.UploadedOn,
+                uploadedBy: file.UploadedBy,
+                folderId: file.FolderID,
+                folderName: file.FolderName,
+                folderPath: file.FolderPath,
+                docId: file.DocID,
+                connectionTable: file.ConnectionTable,
+                metadata: file.Metadata ? JSON.parse(file.Metadata) : null,
+                extractedText: file.ExtractedText,
+                hasText: !!file.ExtractedText,
+                isStarred: file.isStarred,
+                relevanceScore: file.RelevanceScore
+            }));
+
+            res.json({ 
+                files,
+                folders: [], // No folders for filtered searches
+                totalResults: files.length,
+                query: 'Filtered Results'
+            });
+
+        } catch (error) {
+            console.error('Error searching files with filter:', error);
+            res.status(500).json({ message: 'Failed to search files with filter' });
         }
     }
 };

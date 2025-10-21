@@ -23,6 +23,15 @@ router.post('/:tenderId/:fileId/split', boqController.splitBOQ);
 // PUT update packages for a BOQ file
 router.put('/:tenderId/:fileId/packages', boqController.updatePackages);
 
+// List BOQ records for a tender (new schema)
+router.get('/tender/:tenderId', boqController.listTenderBoQ);
+
+// RFQ: list, create, update, and delete quotations for a package
+router.get('/:tenderId/:fileId/packages/:packageName/rfq', boqController.listPackageRFQ);
+router.post('/:tenderId/:fileId/packages/:packageName/rfq', boqController.createPackageRFQ);
+router.put('/:tenderId/:fileId/packages/:packageName/rfq/:rfqId', boqController.updatePackageRFQ);
+router.delete('/:tenderId/:fileId/packages/:packageName/rfq/:rfqId', boqController.deletePackageRFQ);
+
 module.exports = router;
 
 

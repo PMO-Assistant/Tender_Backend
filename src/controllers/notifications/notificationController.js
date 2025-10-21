@@ -17,12 +17,12 @@ const notificationController = {
 	// Test endpoint to verify database connectivity
 	testConnection: async (req, res) => {
 		try {
-			console.log('[NOTIFICATION] Testing database connection...');
+            if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log('[NOTIFICATION] Testing database connection...');
 			const pool = await getConnectedPool();
 			
 			// Test basic query
 			const result = await pool.request().query('SELECT 1 as test');
-			console.log('[NOTIFICATION] Database connection test result:', result.recordset);
+            if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log('[NOTIFICATION] Database connection test result:', result.recordset);
 			
 			// Test notification table structure
 			const tableResult = await pool.request().query(`
@@ -35,7 +35,7 @@ const notificationController = {
 				ORDER BY ORDINAL_POSITION
 			`);
 			
-			console.log('[NOTIFICATION] Table structure:', tableResult.recordset);
+            if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log('[NOTIFICATION] Table structure:', tableResult.recordset);
 			
 			res.json({ 
 				message: 'Database connection test successful',
@@ -58,7 +58,7 @@ const notificationController = {
 			const userId = req.user.UserID;
 			// Only log on first request to reduce console spam
 			if (!req.user._notificationsLogged) {
-				console.log(`[NOTIFICATION] Fetching notifications for user: ${userId}`);
+                if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log(`[NOTIFICATION] Fetching notifications for user: ${userId}`);
 				req.user._notificationsLogged = true;
 			}
 			
@@ -84,7 +84,7 @@ const notificationController = {
 
 			// Only log count, not sample data to reduce console spam
 			if (!req.user._notificationCountLogged) {
-				console.log(`[NOTIFICATION] Found ${result.recordset.length} notifications for user ${userId}`);
+                if (process.env.VERBOSE_NOTIFICATIONS === 'true') console.log(`[NOTIFICATION] Found ${result.recordset.length} notifications for user ${userId}`);
 				req.user._notificationCountLogged = true;
 			}
 			

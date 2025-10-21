@@ -48,8 +48,8 @@ const authenticateToken = async (req, res, next) => {
     }
 
     req.user = result.recordset[0];
-    // Only log authentication on first request or errors - reduce console spam
-    if (!req.user._logged) {
+    // Quiet auth logs unless explicitly enabled
+    if (process.env.VERBOSE_AUTH === 'true' && !req.user._logged) {
       console.log(`[AUTH] User authenticated: ${req.user.Name} (${req.user.Email})`);
       req.user._logged = true;
     }
