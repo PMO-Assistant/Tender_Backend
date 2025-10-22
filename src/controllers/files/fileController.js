@@ -682,6 +682,59 @@ ORDER BY f.CreatedAt DESC;
         }
     },
 
+    // Get file metadata by ID
+    getFileMetadata: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT 
+                        f.FileID,
+                        f.DisplayName as fileName,
+                        f.ContentType as contentType,
+                        f.Metadata as metadata,
+                        f.ExtractedText as extractedText,
+                        f.CreatedAt as createdAt,
+                        f.UpdatedAt as updatedAt,
+                        f.Size as size,
+                        u.Name as uploadedBy
+                    FROM tenderFile f
+                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                    WHERE f.FileID = @FileID 
+                    AND f.IsDeleted = 0
+                    AND f.AddBy = @UserID
+                `);
+
+            if (result.recordset.length === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            const file = result.recordset[0];
+            const metadata = file.metadata ? JSON.parse(file.metadata) : null;
+
+            res.json({
+                metadata: metadata,
+                fileName: file.fileName,
+                contentType: file.contentType,
+                extractedText: file.extractedText,
+                textLength: file.extractedText ? file.extractedText.length : 0,
+                createdAt: file.createdAt,
+                updatedAt: file.updatedAt,
+                size: file.size,
+                uploadedBy: file.uploadedBy
+            });
+
+        } catch (error) {
+            console.error('Error getting file metadata:', error);
+            res.status(500).json({ message: 'Failed to get file metadata' });
+        }
+    },
+
     // Get file by ID
     getFileById: async (req, res) => {
         try {
@@ -1759,4 +1812,3 @@ function getFileType(contentType, fileName) {
 module.exports = {
     fileController,
     upload
-}; 

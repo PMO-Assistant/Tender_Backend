@@ -291,6 +291,15 @@ try {
   console.error('❌ Error loading Watchlist routes:', error.message);
 }
 
+try {
+  console.log('🔄 Loading Email Verification routes...');
+  const emailVerificationRoutes = require('./routes/emailVerification');
+  app.use('/api', emailVerificationRoutes);
+  console.log('✅ Email Verification routes loaded');
+} catch (error) {
+  console.error('❌ Error loading Email Verification routes:', error.message);
+}
+
 
 const PORT = process.env.PORT || 3001;
 

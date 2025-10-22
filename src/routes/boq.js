@@ -34,4 +34,3 @@ router.delete('/:tenderId/:fileId/packages/:packageName/rfq/:rfqId', boqControll
 
 module.exports = router;
 
-

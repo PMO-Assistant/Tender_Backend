@@ -44,6 +44,9 @@ router.post('/search-filter', fileController.searchFilesWithFilter);
 // Get file by ID
 router.get('/:fileId', fileController.getFileById);
 
+// Get file metadata by ID
+router.get('/:fileId/metadata', fileController.getFileMetadata);
+
 // Upload file
 router.post('/upload', upload.single('file'), fileController.uploadFile);
 
@@ -61,5 +64,3 @@ router.delete('/:fileId', fileController.deleteFile);
 
 // Get file preview URL
 router.get('/:fileId/preview', fileController.getFilePreviewUrl);
-
-module.exports = router; 
