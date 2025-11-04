@@ -44,6 +44,10 @@ app.use(cors({
   credentials: true
 }));
 
+// Cookie parser for cookie-based authentication
+const cookieParser = require('cookie-parser');
+app.use(cookieParser());
+
 // Middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -298,6 +302,15 @@ try {
   console.log('✅ Email Verification routes loaded');
 } catch (error) {
   console.error('❌ Error loading Email Verification routes:', error.message);
+}
+
+try {
+  console.log('🔄 Loading Planning News routes...');
+  const planningNewsRoutes = require('./routes/planningNews');
+  app.use('/api/planning-news', planningNewsRoutes);
+  console.log('✅ Planning News routes loaded');
+} catch (error) {
+  console.error('❌ Error loading Planning News routes:', error.message);
 }
 
 

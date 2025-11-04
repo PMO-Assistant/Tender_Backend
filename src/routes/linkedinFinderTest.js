@@ -147,9 +147,6 @@ router.get('/contact/:contactId/history', (req, res) => {
   }
 });
 
-module.exports = router;
-
-
 console.log('[LINKEDIN TEST] Test routes file loaded successfully');
 
 // Basic test route

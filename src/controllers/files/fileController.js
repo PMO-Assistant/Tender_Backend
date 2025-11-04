@@ -28,7 +28,7 @@ const fileController = {
             const result = await pool.request()
                 .input('UserID', userId)
                 .query(`
-                    SELECT 
+                    SELECT DISTINCT
                         f.FolderID,
                         f.ParentFolderID,
                         f.FolderName,
@@ -196,57 +196,101 @@ const fileController = {
             const taskFolderName = `${taskId} - ${taskDescription}`;
             const taskFolderPath = `/Tasks/${taskFolderName}`;
 
-            // Check if task folder already exists (by DocID and ConnectionTable)
-            const existingFolderResult = await pool.request()
-                .input('DocID', taskId)
-                .input('ConnectionTable', 'tenderTask')
-                .input('ParentFolderID', tasksFolderId)
-                .query(`
-                    SELECT FolderID, FolderPath, FolderName
-                    FROM tenderFolder 
-                    WHERE DocID = @DocID 
-                      AND ConnectionTable = @ConnectionTable 
-                      AND ParentFolderID = @ParentFolderID
-                `);
+            // Use a transaction to atomically check and create folder
+            // This prevents race conditions when multiple requests come in simultaneously
+            const transaction = pool.transaction();
+            
+            try {
+                await transaction.begin();
+                
+                const request = transaction.request();
+                
+                // Declare all parameters once for both queries (to avoid duplicate parameter error)
+                request
+                    .input('DocID', taskId)
+                    .input('ConnectionTable', 'tenderTask')
+                    .input('ParentFolderID', tasksFolderId)
+                    .input('FolderName', taskFolderName)
+                    .input('FolderPath', taskFolderPath)
+                    .input('FolderType', 'sub')
+                    .input('AddBy', userId);
+                
+                // Check if folder exists with UPDLOCK and HOLDLOCK to prevent concurrent inserts
+                const existingFolderResult = await request
+                    .query(`
+                        SELECT FolderID, FolderPath, FolderName
+                        FROM tenderFolder WITH (UPDLOCK, HOLDLOCK)
+                        WHERE DocID = @DocID 
+                          AND ConnectionTable = @ConnectionTable 
+                          AND ParentFolderID = @ParentFolderID
+                    `);
 
-            if (existingFolderResult.recordset.length > 0) {
-                // Folder exists, return its info
-                const existingFolder = existingFolderResult.recordset[0];
-                return res.json({ 
-                    folderId: existingFolder.FolderID,
-                    folderPath: existingFolder.FolderPath,
-                    folderName: existingFolder.FolderName,
-                    exists: true,
+                if (existingFolderResult.recordset.length > 0) {
+                    // Folder exists, commit and return
+                    await transaction.commit();
+                    const existingFolder = existingFolderResult.recordset[0];
+                    return res.json({ 
+                        folderId: existingFolder.FolderID,
+                        folderPath: existingFolder.FolderPath,
+                        folderName: existingFolder.FolderName,
+                        exists: true,
+                        docId: taskId,
+                        connectionTable: 'tenderTask'
+                    });
+                }
+
+                // Folder doesn't exist, create it (using same request object with already-declared parameters)
+                const insertResult = await request
+                    .query(`
+                        INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                        OUTPUT INSERTED.FolderID, INSERTED.FolderPath, INSERTED.FolderName
+                        VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                    `);
+
+                await transaction.commit();
+
+                const newFolder = insertResult.recordset[0];
+                
+                res.json({ 
+                    folderId: newFolder.FolderID,
+                    folderPath: newFolder.FolderPath,
+                    folderName: newFolder.FolderName,
+                    exists: false,
                     docId: taskId,
                     connectionTable: 'tenderTask'
                 });
+            } catch (insertError) {
+                await transaction.rollback();
+                
+                // If insert failed, check if folder was created by another concurrent request
+                const checkResult = await pool.request()
+                    .input('DocID', taskId)
+                    .input('ConnectionTable', 'tenderTask')
+                    .input('ParentFolderID', tasksFolderId)
+                    .query(`
+                        SELECT FolderID, FolderPath, FolderName
+                        FROM tenderFolder 
+                        WHERE DocID = @DocID 
+                          AND ConnectionTable = @ConnectionTable 
+                          AND ParentFolderID = @ParentFolderID
+                    `);
+
+                if (checkResult.recordset.length > 0) {
+                    // Folder was created by another request, return it
+                    const existingFolder = checkResult.recordset[0];
+                    return res.json({ 
+                        folderId: existingFolder.FolderID,
+                        folderPath: existingFolder.FolderPath,
+                        folderName: existingFolder.FolderName,
+                        exists: true,
+                        docId: taskId,
+                        connectionTable: 'tenderTask'
+                    });
+                }
+                
+                // Re-throw the error if folder still doesn't exist
+                throw insertError;
             }
-
-            // Create the task folder with DocID and ConnectionTable
-            const insertResult = await pool.request()
-                .input('FolderName', taskFolderName)
-                .input('FolderPath', taskFolderPath)
-                .input('FolderType', 'sub')
-                .input('ParentFolderID', tasksFolderId)
-                .input('AddBy', userId)
-                .input('DocID', taskId)
-                .input('ConnectionTable', 'tenderTask')
-                .query(`
-                    INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                    OUTPUT INSERTED.FolderID, INSERTED.FolderPath
-                    VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
-                `);
-
-            const newFolder = insertResult.recordset[0];
-            
-            res.json({ 
-                folderId: newFolder.FolderID,
-                folderPath: newFolder.FolderPath,
-                folderName: taskFolderName,
-                exists: false,
-                docId: taskId,
-                connectionTable: 'tenderTask'
-            });
 
         } catch (error) {
             console.error('Error ensuring task folder:', error);
@@ -1164,21 +1208,55 @@ ORDER BY f.CreatedAt DESC;
             const fileId = result.recordset[0].FileID;
             console.log('File saved to database with ID:', fileId);
 
-            // If uploaded into Tender > BOQ, create tenderBoQ row per new schema
+            // If uploaded into Tender > BOQ folder, create tenderBoQ row per new schema
             try {
-                if (connectionTable === 'tenderTender' && docId) {
-                    await pool.request()
-                        .input('TenderID', parseInt(docId))
-                        .input('FileID', parseInt(fileId))
+                if (connectionTable === 'tenderTender' && docId && folderId) {
+                    // Check if the file was uploaded to a BOQ folder
+                    const folderCheck = await pool.request()
+                        .input('FolderID', parseInt(folderId))
+                        .query(`
+                            SELECT FolderName, ParentFolderID 
+                            FROM tenderFolder 
+                            WHERE FolderID = @FolderID
+                        `);
+                    
+                    const folderName = folderCheck.recordset[0]?.FolderName || '';
+                    const parentFolderId = folderCheck.recordset[0]?.ParentFolderID;
+                    
+                    // Check if it's a BOQ folder (direct or nested)
+                    let isBoqFolder = folderName === 'BOQ';
+                    if (!isBoqFolder && parentFolderId) {
+                        // Check parent folder
+                        const parentCheck = await pool.request()
+                            .input('ParentFolderID', parentFolderId)
+                            .query(`SELECT FolderName FROM tenderFolder WHERE FolderID = @ParentFolderID`);
+                        isBoqFolder = parentCheck.recordset[0]?.FolderName === 'BOQ';
+                    }
+                    
+                    if (isBoqFolder) {
+                        const tenderIdInt = parseInt(docId);
+                        const fileIdInt = parseInt(fileId);
+                        console.log(`[uploadFile] Creating tenderBoQ record: TenderID=${tenderIdInt}, FileID=${fileIdInt}, FolderName=${folderName}`);
+                        
+                        const boqResult = await pool.request()
+                            .input('TenderID', tenderIdInt)
+                            .input('FileID', fileIdInt)
                         .input('UploadedAt', new Date())
                         .input('Description', metadata?.title || originalname)
                         .query(`
                             INSERT INTO tenderBoQ (TenderID, FileID, UploadedAt, Description)
                             VALUES (@TenderID, @FileID, @UploadedAt, @Description)
                         `);
+                        console.log(`[uploadFile] ✅ Successfully created tenderBoQ record for FileID=${fileIdInt}`);
+                    } else {
+                        console.log(`[uploadFile] Skipping tenderBoQ creation: File not in BOQ folder (FolderName=${folderName}, FolderID=${folderId})`);
+                    }
+                } else {
+                    console.log(`[uploadFile] Skipping tenderBoQ creation: connectionTable=${connectionTable}, docId=${docId}, folderId=${folderId}`);
                 }
             } catch (boqErr) {
-                console.error('Failed to insert tenderBoQ record:', boqErr.message);
+                console.error('[uploadFile] ❌ Failed to insert tenderBoQ record:', boqErr.message);
+                console.error('[uploadFile] Error stack:', boqErr.stack);
             }
 
             // Upload to Azure Blob Storage
@@ -1232,6 +1310,77 @@ ORDER BY f.CreatedAt DESC;
                 error: error.message,
                 stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
             });
+        }
+    },
+
+    // Convert Word document to PDF
+    convertWordToPdf: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            console.log(`🔍 PDF conversion request for file ID: ${fileId} by user: ${userId}`);
+
+            // Get file info
+            const result = await pool.request()
+                .input('FileID', fileId)
+                .input('UserID', userId)
+                .query(`
+                    SELECT DisplayName, BlobPath, ContentType
+                    FROM tenderFile
+                    WHERE FileID = @FileID AND AddBy = @UserID AND IsDeleted = 0
+                `);
+
+            if (result.recordset.length === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            const file = result.recordset[0];
+            const fileName = file.DisplayName.toLowerCase();
+            
+            // Check if it's a Word document
+            if (!fileName.endsWith('.docx') && !fileName.endsWith('.doc')) {
+                return res.status(400).json({ message: 'File is not a Word document' });
+            }
+
+            // Download from Azure Blob Storage
+            const stream = await downloadFile(file.BlobPath);
+            
+            if (!stream) {
+                return res.status(500).json({ message: 'Failed to get file stream' });
+            }
+
+            // Convert stream to buffer
+            const chunks = [];
+            for await (const chunk of stream) {
+                chunks.push(chunk);
+            }
+            const buffer = Buffer.concat(chunks);
+
+            // Try to convert using libreoffice-convert
+            try {
+                const libre = require('libreoffice-convert');
+                const { promisify } = require('util');
+                const convertAsync = promisify(libre.convert);
+                
+                const pdfBuffer = await convertAsync(buffer, '.pdf', undefined);
+                
+                // Return PDF
+                res.setHeader('Content-Type', 'application/pdf');
+                res.setHeader('Content-Disposition', `inline; filename="${file.DisplayName.replace(/\.(docx?)$/i, '.pdf')}"`);
+                return res.send(pdfBuffer);
+            } catch (libreError) {
+                console.error('LibreOffice conversion error:', libreError);
+                console.log('⚠️ LibreOffice may not be installed. Returning original file.');
+                // Fallback: return original file
+                res.setHeader('Content-Type', file.ContentType || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+                res.setHeader('Content-Disposition', `attachment; filename="${file.DisplayName}"`);
+                return res.send(buffer);
+            }
+        } catch (error) {
+            console.error('❌ Error converting Word to PDF:', error);
+            res.status(500).json({ message: 'Failed to convert file', error: error.message });
         }
     },
 
@@ -1425,6 +1574,16 @@ ORDER BY f.CreatedAt DESC;
                     WHERE f.FileID = @FileID AND f.IsDeleted = 0
                 `);
 
+            console.log('🔍 File query result:', {
+                found: fileResult.recordset.length > 0,
+                file: fileResult.recordset.length > 0 ? {
+                    DisplayName: fileResult.recordset[0].DisplayName,
+                    ContentType: fileResult.recordset[0].ContentType,
+                    AddBy: fileResult.recordset[0].AddBy,
+                    Admin: fileResult.recordset[0].Admin
+                } : null
+            });
+
             if (fileResult.recordset.length === 0) {
                 return res.status(404).json({ error: 'File not found' });
             }
@@ -1437,14 +1596,32 @@ ORDER BY f.CreatedAt DESC;
                 return res.status(403).json({ error: 'Access denied' });
             }
 
-            // Check if it's an Excel file
+            // Check if it's an Excel or Word file
             const isExcelFile = file.ContentType.includes('spreadsheet') || 
                                file.ContentType.includes('excel') ||
                                file.DisplayName.toLowerCase().endsWith('.xlsx') ||
                                file.DisplayName.toLowerCase().endsWith('.xls');
+            
+            const isWordFile = file.ContentType && (
+                               file.ContentType.includes('wordprocessingml') ||
+                               file.ContentType.includes('msword') ||
+                               file.ContentType.includes('document')
+                               ) || 
+                               file.DisplayName.toLowerCase().endsWith('.docx') ||
+                               file.DisplayName.toLowerCase().endsWith('.doc');
 
-            if (!isExcelFile) {
-                return res.status(400).json({ error: 'File is not an Excel file' });
+            console.log('🔍 File type check:', {
+                DisplayName: file.DisplayName,
+                ContentType: file.ContentType,
+                isExcelFile,
+                isWordFile,
+                endsWithDocx: file.DisplayName.toLowerCase().endsWith('.docx'),
+                endsWithDoc: file.DisplayName.toLowerCase().endsWith('.doc')
+            });
+
+            if (!isExcelFile && !isWordFile) {
+                console.log('❌ File is not Excel or Word:', file.DisplayName, file.ContentType);
+                return res.status(400).json({ error: 'File is not an Excel or Word file' });
             }
 
             // Generate SAS URL for the blob
@@ -1812,3 +1989,182 @@ function getFileType(contentType, fileName) {
 module.exports = {
     fileController,
     upload
+};
+                        tf.ParentFolderID,
+                        tf.FolderType,
+                        tf.DisplayOrder,
+                        tf.IsActive,
+                        tf.CreatedAt,
+                        tf.UpdatedAt,
+                        tf.DocID,
+                        tf.ConnectionTable,
+                        tf.AddBy as CreatedBy,
+                        -- Calculate relevance score for folders (normalized to 0-100)
+                        CASE 
+                            WHEN tf.FolderName LIKE @SearchTermExact THEN 100
+                            WHEN tf.FolderName LIKE @SearchTerm THEN 80
+                            WHEN tf.FolderPath LIKE @SearchTerm THEN 60
+                            WHEN tf.FolderType LIKE @SearchTerm THEN 40
+                            WHEN CONVERT(VARCHAR, tf.CreatedAt, 23) LIKE @SearchTerm THEN 20
+                            WHEN CONVERT(VARCHAR, tf.UpdatedAt, 23) LIKE @SearchTerm THEN 20
+                            ELSE 0
+                        END as RelevanceScore
+                    FROM tenderFolder tf
+                    WHERE tf.IsActive = 1 AND tf.AddBy = @UserID
+                    AND (
+                        tf.FolderName LIKE @SearchTerm OR
+                        tf.FolderPath LIKE @SearchTerm OR
+                        tf.FolderType LIKE @SearchTerm OR
+                        CONVERT(VARCHAR, tf.CreatedAt, 23) LIKE @SearchTerm OR
+                        CONVERT(VARCHAR, tf.UpdatedAt, 23) LIKE @SearchTerm
+                    )
+                    ORDER BY RelevanceScore DESC, tf.CreatedAt DESC
+                `);
+
+            // Format files response
+            const files = filesResult.recordset.map(file => ({
+                fileId: file.FileID,
+                fileName: file.DisplayName,
+                size: file.Size,
+                contentType: file.ContentType,
+                uploadedOn: file.UploadedOn,
+                uploadedBy: file.UploadedBy,
+                folderId: file.FolderID,
+                folderName: file.FolderName,
+                folderPath: file.FolderPath,
+                docId: file.DocID,
+                connectionTable: file.ConnectionTable,
+                metadata: file.Metadata ? JSON.parse(file.Metadata) : null,
+                extractedText: file.ExtractedText,
+                hasText: !!file.ExtractedText,
+                isStarred: file.isStarred,
+                relevanceScore: file.RelevanceScore
+            }));
+
+            // Format folders response
+            const folders = foldersResult.recordset.map(folder => ({
+                folderId: folder.FolderID,
+                folderName: folder.FolderName,
+                folderPath: folder.FolderPath,
+                parentFolderId: folder.ParentFolderID,
+                folderType: folder.FolderType,
+                createdAt: folder.CreatedAt,
+                updatedAt: folder.UpdatedAt,
+                docId: folder.DocID,
+                connectionTable: folder.ConnectionTable,
+                createdBy: folder.CreatedBy,
+                relevanceScore: folder.RelevanceScore
+            }));
+
+            res.json({ 
+                files,
+                folders,
+                totalResults: files.length + folders.length,
+                query: query.trim()
+            });
+
+        } catch (error) {
+            console.error('Error searching files:', error);
+            res.status(500).json({ message: 'Failed to search files' });
+        }
+    },
+
+    // Search files with custom SQL filter (for suggestions)
+    searchFilesWithFilter: async (req, res) => {
+        try {
+            const { sqlFilter } = req.body;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!sqlFilter) {
+                return res.status(400).json({ message: 'SQL filter is required' });
+            }
+
+            // Build the query with the custom filter
+            const query = `
+                SELECT TOP 50
+                    f.FileID,
+                    f.DisplayName,
+                    f.BlobPath,
+                    f.UploadedOn,
+                    f.Size,
+                    f.ContentType,
+                    f.Status,
+                    f.CreatedAt,
+                    f.UpdatedAt,
+                    f.DocID,
+                    f.ConnectionTable,
+                    f.Metadata,
+                    f.ExtractedText,
+                    u.Name as UploadedBy,
+                    tf.FolderID,
+                    tf.FolderName,
+                    tf.FolderPath,
+                    CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred,
+                    100 as RelevanceScore
+                FROM tenderFile f
+                LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                LEFT JOIN tenderFolder tf ON f.FolderID = tf.FolderID
+                LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+                WHERE f.IsDeleted = 0 AND f.AddBy = @UserID
+                ${sqlFilter}
+            `;
+
+            const filesResult = await pool.request()
+                .input('UserID', userId)
+                .query(query);
+
+            // Format files response
+            const files = filesResult.recordset.map(file => ({
+                fileId: file.FileID,
+                fileName: file.DisplayName,
+                size: file.Size,
+                contentType: file.ContentType,
+                uploadedOn: file.UploadedOn,
+                uploadedBy: file.UploadedBy,
+                folderId: file.FolderID,
+                folderName: file.FolderName,
+                folderPath: file.FolderPath,
+                docId: file.DocID,
+                connectionTable: file.ConnectionTable,
+                metadata: file.Metadata ? JSON.parse(file.Metadata) : null,
+                extractedText: file.ExtractedText,
+                hasText: !!file.ExtractedText,
+                isStarred: file.isStarred,
+                relevanceScore: file.RelevanceScore
+            }));
+
+            res.json({ 
+                files,
+                folders: [], // No folders for filtered searches
+                totalResults: files.length,
+                query: 'Filtered Results'
+            });
+
+        } catch (error) {
+            console.error('Error searching files with filter:', error);
+            res.status(500).json({ message: 'Failed to search files with filter' });
+        }
+    }
+};
+
+// Helper function to determine file type
+function getFileType(contentType, fileName) {
+    const extension = path.extname(fileName).toLowerCase();
+    
+    if (contentType.startsWith('image/')) return 'image';
+    if (contentType.startsWith('video/')) return 'video';
+    if (contentType.startsWith('audio/')) return 'audio';
+    if (contentType.includes('pdf')) return 'pdf';
+    if (contentType.includes('excel') || extension === '.xlsx' || extension === '.xls') return 'excel';
+    if (contentType.includes('powerpoint') || extension === '.pptx' || extension === '.ppt') return 'powerpoint';
+    if (contentType.includes('word') || extension === '.docx' || extension === '.doc') return 'word';
+    if (extension === '.zip' || extension === '.rar' || extension === '.7z') return 'archive';
+    
+    return 'file';
+}
+
+module.exports = {
+    fileController,
+    upload
+};

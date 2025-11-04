@@ -7,12 +7,18 @@ const fileFavController = {
             const { fileId } = req.params;
             const userId = req.user.UserID;
 
+            console.log('Adding file to favorites:', { fileId, userId });
+
+            if (!fileId) {
+                return res.status(400).json({ message: 'File ID is required' });
+            }
+
             const pool = await getConnectedPool();
 
             // Check if already favorited
             const existingResult = await pool.request()
                 .input('UserID', userId)
-                .input('FileID', fileId)
+                .input('FileID', parseInt(fileId))
                 .query(`
                     SELECT FileFavID 
                     FROM tenderFileFav 
@@ -26,16 +32,17 @@ const fileFavController = {
             // Add to favorites
             await pool.request()
                 .input('UserID', userId)
-                .input('FileID', fileId)
+                .input('FileID', parseInt(fileId))
                 .query(`
                     INSERT INTO tenderFileFav (UserID, FileID)
                     VALUES (@UserID, @FileID)
                 `);
 
+            console.log('File added to favorites successfully');
             res.json({ message: 'File added to favorites successfully' });
         } catch (error) {
             console.error('Error adding file to favorites:', error);
-            res.status(500).json({ message: 'Failed to add file to favorites' });
+            res.status(500).json({ message: error.message || 'Failed to add file to favorites' });
         }
     },
 
@@ -45,11 +52,17 @@ const fileFavController = {
             const { fileId } = req.params;
             const userId = req.user.UserID;
 
+            console.log('Removing file from favorites:', { fileId, userId });
+
+            if (!fileId) {
+                return res.status(400).json({ message: 'File ID is required' });
+            }
+
             const pool = await getConnectedPool();
 
             const result = await pool.request()
                 .input('UserID', userId)
-                .input('FileID', fileId)
+                .input('FileID', parseInt(fileId))
                 .query(`
                     DELETE FROM tenderFileFav 
                     WHERE UserID = @UserID AND FileID = @FileID;
@@ -61,10 +74,11 @@ const fileFavController = {
                 return res.status(404).json({ message: 'File not found in favorites' });
             }
 
+            console.log('File removed from favorites successfully');
             res.json({ message: 'File removed from favorites successfully' });
         } catch (error) {
             console.error('Error removing file from favorites:', error);
-            res.status(500).json({ message: 'Failed to remove file from favorites' });
+            res.status(500).json({ message: error.message || 'Failed to remove file from favorites' });
         }
     },
 
@@ -75,12 +89,14 @@ const fileFavController = {
 
             const pool = await getConnectedPool();
 
+            // Query optimized with indexes - SQL Server will automatically use them
             const result = await pool.request()
                 .input('UserID', userId)
                 .query(`
                     SELECT 
                         f.FileID,
                         f.DisplayName,
+                        f.BlobPath,
                         f.ContentType,
                         f.Size,
                         f.UploadedOn,
@@ -88,6 +104,7 @@ const fileFavController = {
                         f.UpdatedAt,
                         f.DocID,
                         f.ConnectionTable,
+                        f.Metadata,
                         u.Name as UploadedBy,
                         tf.FolderID,
                         tf.FolderName,
@@ -105,6 +122,7 @@ const fileFavController = {
             const files = result.recordset.map(file => ({
                 id: file.FileID,
                 name: file.DisplayName,
+                blobPath: file.BlobPath,
                 contentType: file.ContentType,
                 size: file.Size,
                 uploadedOn: file.UploadedOn,
@@ -116,6 +134,7 @@ const fileFavController = {
                 folderPath: file.FolderPath,
                 docId: file.DocID,
                 connectionTable: file.ConnectionTable,
+                metadata: file.Metadata,
                 isStarred: true, // Since these are from favorites
                 type: getFileType(file.ContentType, file.DisplayName)
             }));

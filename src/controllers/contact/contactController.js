@@ -85,15 +85,34 @@ const contactController = {
             const result = await pool.request()
                 .query(`
                     SELECT 
-                        c.*,
+                        c.ContactID,
+                        c.FullName,
+                        c.Email,
+                        c.Phone,
+                        c.CompanyID,
+                        c.CreatedAt,
+                        c.UpdatedAt,
                         comp.CompanyName as CompanyName
                     FROM tenderContact c
                     LEFT JOIN tenderCompany comp ON c.CompanyID = comp.CompanyID
                     WHERE c.IsDeleted = 0
                     ORDER BY c.FullName
                 `);
+            console.log(`[getAllContacts] Returning ${result.recordset.length} contacts`);
+            // Log sample to verify CompanyID is included
+            if (result.recordset.length > 0) {
+                const sample = result.recordset[0];
+                console.log(`[getAllContacts] Sample contact:`, {
+                    ContactID: sample.ContactID,
+                    FullName: sample.FullName,
+                    Email: sample.Email,
+                    CompanyID: sample.CompanyID,
+                    CompanyName: sample.CompanyName
+                });
+            }
             res.json(result.recordset);
         } catch (err) {
+            console.error('[getAllContacts] Error:', err);
             res.status(500).json({ message: err.message });
         }
     },
@@ -107,9 +126,11 @@ const contactController = {
                 .query(`
                     SELECT 
                         c.*,
-                        comp.CompanyName as CompanyName
+                        comp.CompanyName as CompanyName,
+                        u.Name as AddedByName
                     FROM tenderContact c
                     LEFT JOIN tenderCompany comp ON c.CompanyID = comp.CompanyID
+                    LEFT JOIN tenderEmployee u ON c.AddBy = u.UserID
                     WHERE c.ContactID = @ContactID AND c.IsDeleted = 0
                 `);
             
@@ -346,6 +367,27 @@ const contactController = {
         try {
             const pool = await getConnectedPool();
             const result = await pool.request()
+                .input('ContactID', req.params.id)
+                .query(`
+                    UPDATE tenderContact
+                    SET IsDeleted = 1,
+                        DeletedAt = GETDATE()
+                    WHERE ContactID = @ContactID AND IsDeleted = 0
+                `);
+
+            if (result.rowsAffected[0] === 0) {
+                return res.status(404).json({ message: 'Contact not found or already deleted' });
+            }
+
+            res.json({ message: 'Contact deleted successfully' });
+        } catch (err) {
+            res.status(500).json({ message: err.message });
+        }
+    }
+};
+
+module.exports = contactController;
+
                 .input('ContactID', req.params.id)
                 .query(`
                     UPDATE tenderContact

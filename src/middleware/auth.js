@@ -6,8 +6,14 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-producti
 
 // Enhanced authentication middleware with redirect support
 const authenticateToken = async (req, res, next) => {
+  // Try to get token from Authorization header first
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  let token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  // If no token in header, try to get from cookies (cookie-based auth)
+  if (!token && req.cookies) {
+    token = req.cookies.backend_token || req.cookies.token;
+  }
 
   if (!token) {
     return res.status(401).json({ 

@@ -32,5 +32,29 @@ router.post('/:tenderId/:fileId/packages/:packageName/rfq', boqController.create
 router.put('/:tenderId/:fileId/packages/:packageName/rfq/:rfqId', boqController.updatePackageRFQ);
 router.delete('/:tenderId/:fileId/packages/:packageName/rfq/:rfqId', boqController.deletePackageRFQ);
 
+// GET split files derived from a BOQ
+router.get('/:tenderId/:fileId/split-files', boqController.getSplitFiles);
+
+// GET package dashboard stats
+router.get('/:tenderId/:fileId/packages/dashboard', boqController.getPackageDashboardStats);
+
+// GET breakdown coverage report
+router.get('/:tenderId/:fileId/breakdown-report', boqController.breakdownReport);
+
+// DELETE BOQ and its file (soft-delete file)
+router.delete('/:tenderId/:fileId', boqController.deleteBoQ);
+
+module.exports = router;
+
+
+// GET package dashboard stats
+router.get('/:tenderId/:fileId/packages/dashboard', boqController.getPackageDashboardStats);
+
+// GET breakdown coverage report
+router.get('/:tenderId/:fileId/breakdown-report', boqController.breakdownReport);
+
+// DELETE BOQ and its file (soft-delete file)
+router.delete('/:tenderId/:fileId', boqController.deleteBoQ);
+
 module.exports = router;
 

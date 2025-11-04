@@ -183,12 +183,12 @@ async function uploadAttachment(req, res) {
 
         const pool = await getConnectedPool();
 
-        // Check if task exists and user has access
+        // Check if task exists and user has access, and get task description
         const taskCheck = await pool.request()
             .input('TaskID', taskId)
             .input('UserID', userId)
             .query(`
-                SELECT TaskID FROM tenderTask
+                SELECT TaskID, Description FROM tenderTask
                 WHERE TaskID = @TaskID
                   AND (AddBy = @UserID OR TaskID IN (
                     SELECT TaskID FROM tenderTaskAssignee WHERE UserID = @UserID
@@ -202,6 +202,67 @@ async function uploadAttachment(req, res) {
                 error: 'Task not found',
                 message: 'Task does not exist or you do not have permission to upload attachments'
             });
+        }
+
+        const task = taskCheck.recordset[0];
+        const taskDescription = task.Description || `Task ${taskId}`;
+
+        // Ensure task folder exists (will create it if it doesn't)
+        let folderId = 13; // fallback default
+        try {
+            // Get the Tasks folder ID first
+            const tasksFolderResult = await pool.request()
+                .query(`
+                    SELECT FolderID 
+                    FROM tenderFolder 
+                    WHERE FolderName = 'Tasks' AND FolderType = 'main'
+                `);
+
+            if (tasksFolderResult.recordset.length > 0) {
+                const tasksFolderId = tasksFolderResult.recordset[0].FolderID;
+                const taskFolderName = `${taskId} - ${taskDescription}`;
+
+                // Check if folder exists
+                const existingFolderResult = await pool.request()
+                    .input('DocID', parseInt(taskId))
+                    .input('ConnectionTable', 'tenderTask')
+                    .input('ParentFolderID', tasksFolderId)
+                    .query(`
+                        SELECT FolderID, FolderPath, FolderName
+                        FROM tenderFolder
+                        WHERE DocID = @DocID 
+                          AND ConnectionTable = @ConnectionTable 
+                          AND ParentFolderID = @ParentFolderID
+                    `);
+
+                if (existingFolderResult.recordset.length > 0) {
+                    // Folder exists, use it
+                    folderId = existingFolderResult.recordset[0].FolderID;
+                    console.log('Using existing task folder ID:', folderId);
+                } else {
+                    // Folder doesn't exist, create it
+                    const taskFolderPath = `/Tasks/${taskFolderName}`;
+                    const insertResult = await pool.request()
+                        .input('FolderName', taskFolderName)
+                        .input('FolderPath', taskFolderPath)
+                        .input('FolderType', 'sub')
+                        .input('ParentFolderID', tasksFolderId)
+                        .input('AddBy', userId)
+                        .input('DocID', parseInt(taskId))
+                        .input('ConnectionTable', 'tenderTask')
+                        .query(`
+                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                            OUTPUT INSERTED.FolderID
+                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                        `);
+
+                    folderId = insertResult.recordset[0].FolderID;
+                    console.log('Created new task folder with ID:', folderId);
+                }
+            }
+        } catch (folderError) {
+            console.warn('Could not ensure task folder, using default folder ID 13:', folderError);
+            // Continue with default folder ID
         }
 
         // Generate filename with proper virtual folder structure
@@ -223,7 +284,7 @@ async function uploadAttachment(req, res) {
             .input('Size', req.file.size)
             .input('ContentType', req.file.mimetype)
             .input('AddBy', userId)
-            .input('FolderID', 13) // Default folder ID for task attachments
+            .input('FolderID', folderId) // Use the folder ID from ensureTaskFolder
             .input('DocID', taskId)
             .input('ConnectionTable', 'tenderTask')
             .query(`

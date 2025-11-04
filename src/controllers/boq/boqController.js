@@ -3,6 +3,25 @@ const ExcelJS = require('exceljs');
 const { getConnectedPool } = require('../../config/database');
 const { downloadFile, uploadFile } = require('../../config/azureBlobService');
 const openAIService = require('../../config/openAIService');
+// Utility: expand compact range string like "1-3,5,9-10" to array of numbers
+function expandRangeString(rangeStr) {
+  const result = [];
+  if (!rangeStr) return result;
+  String(rangeStr).split(',').map(s => s.trim()).filter(Boolean).forEach(part => {
+    const m = part.match(/^(\d+)-(\d+)$/);
+    if (m) {
+      const start = parseInt(m[1], 10);
+      const end = parseInt(m[2], 10);
+      if (!isNaN(start) && !isNaN(end) && end >= start) {
+        for (let i = start; i <= end; i++) result.push(i);
+      }
+    } else {
+      const n = parseInt(part, 10);
+      if (!isNaN(n)) result.push(n);
+    }
+  });
+  return result;
+}
 
 async function streamToBuffer(readableStream) {
   return new Promise((resolve, reject) => {
@@ -15,6 +34,56 @@ async function streamToBuffer(readableStream) {
     });
     readableStream.on('error', reject);
   });
+}
+
+// Helper: upload buffer as a new file into tenderFile and Azure Blob
+async function uploadBufferToFolder(buffer, folderId, displayName, tenderId, userId) {
+  const pool = await getConnectedPool();
+  const mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const timestamp = Date.now();
+  const safeName = String(displayName || 'BOQ.xlsx').replace(/\s+/g, ' ');
+  const blobPath = `uploads/${timestamp}_${safeName}`;
+  // Upload to Azure
+  await uploadFile(blobPath, buffer, mimeType);
+  // Insert DB record
+  const result = await pool.request()
+    .input('AddBy', userId ? parseInt(userId) : null)
+    .input('FolderID', folderId || null)
+    .input('BlobPath', blobPath)
+    .input('DisplayName', safeName)
+    .input('Size', buffer.length)
+    .input('ContentType', mimeType)
+    .input('Status', 1)
+    .input('DocID', tenderId ? parseInt(tenderId) : null)
+    .input('ConnectionTable', tenderId ? 'tenderTender' : null)
+    .input('Metadata', JSON.stringify({ title: displayName }))
+    .input('ExtractedText', null)
+    .query(`
+      INSERT INTO tenderFile (AddBy, FolderID, BlobPath, DisplayName, UploadedOn, Size, ContentType, Status, DocID, ConnectionTable, Metadata, ExtractedText)
+      VALUES (@AddBy, @FolderID, @BlobPath, @DisplayName, GETDATE(), @Size, @ContentType, @Status, @DocID, @ConnectionTable, @Metadata, @ExtractedText);
+      SELECT SCOPE_IDENTITY() as FileID;
+    `);
+  const newFileId = result.recordset[0]?.FileID;
+  return { fileId: newFileId, blobPath, contentType: mimeType };
+}
+
+
+// Overwrite an existing tenderFile's blob and update its metadata (size, UploadedOn)
+async function overwriteExistingFile(fileId, blobPath, buffer, contentType) {
+  const pool = await getConnectedPool();
+  const mimeType = contentType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  // Overwrite blob at same path
+  await uploadFile(blobPath, buffer, mimeType);
+  // Update DB row
+  await pool.request()
+    .input('FileID', parseInt(fileId))
+    .input('Size', buffer.length)
+    .query(`
+      UPDATE tenderFile
+      SET Size = @Size, UploadedOn = GETDATE()
+      WHERE FileID = @FileID
+    `);
+  return { fileId, blobPath, contentType: mimeType };
 }
 
 
@@ -93,7 +162,10 @@ function simpleHeuristicPackages(text) {
   }
   
   const result = Array.from(found);
-  console.log(`Generated ${result.length} fallback packages:`, result);
+  // Only log fallback packages in debug mode (reduce console noise)
+  if (process.env.DEBUG_BOQ === 'true') {
+    console.log(`Generated ${result.length} fallback packages:`, result);
+  }
   return result;
 }
 
@@ -141,67 +213,11 @@ BOQ text (may be truncated):\n${truncated}`;
       }
     } catch (_) {}
     // Fallback if parsing fails
-    console.log('OpenAI response parsing failed, using fallback packages');
     return { packages: simpleHeuristicPackages(text), source: 'fallback' };
   } catch (e) {
-    console.log('OpenAI API error, using fallback packages:', e.response?.data?.message || e.message);
-    return { packages: simpleHeuristicPackages(text), source: 'fallback' };
-  }
-}
-
-async function callMistralForPackages(text) {
-  const apiKey = process.env.MISTRAL_API_KEY;
-  if (!apiKey) {
-    console.log('No Mistral API key found, using fallback packages');
-    return { packages: simpleHeuristicPackages(text), source: 'fallback' };
-  }
-  
-  const truncated = (text || '').slice(0, 12000);
-  const prompt = `You are classifying a Bill of Quantities (BOQ) into high-level trade packages.
-Return ONLY strict JSON with this shape: { "packages": ["string", ...] }.
-Rules:
-- Use short, conventional package names (e.g., "Civil Works", "Structural Works", "Flooring", "Electrical", "Mechanical", "Plumbing", "Finishes", "External Works").
-- Base your list on the BOQ content. Do not invent irrelevant trades.
-- Avoid duplicates; 5-15 items is typical. Do not include explanations.
-- Do not list line items; only the package names.
-
-BOQ text (may be truncated):\n${truncated}`;
-
-  try {
-    const resp = await axios.post('https://api.mistral.ai/v1/chat/completions', {
-      model: 'mistral-large-latest',
-      messages: [{ role: 'user', content: `${prompt}\n\nReturn only JSON.` }],
-      max_tokens: 400,
-      temperature: 0.2
-    }, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const content = resp.data?.choices?.[0]?.message?.content || '';
-    try {
-      const jsonStart = content.indexOf('{');
-      const jsonEnd = content.lastIndexOf('}');
-      const jsonStr = jsonStart >= 0 ? content.slice(jsonStart, jsonEnd + 1) : content;
-      const parsed = JSON.parse(jsonStr);
-      if (Array.isArray(parsed.packages)) {
-        // Normalize
-        const uniq = Array.from(new Set(parsed.packages.map(p => String(p).trim()).filter(Boolean)));
-        return { packages: uniq, source: 'mistral' };
-      }
-    } catch (_) {}
-    // Fallback if parsing fails
-    console.log('Mistral response parsing failed, using fallback packages');
-    return { packages: simpleHeuristicPackages(text), source: 'fallback' };
-  } catch (e) {
-    // Check if it's a capacity/service tier error
-    const errorData = e.response?.data;
-    if (errorData && (errorData.code === '3505' || errorData.type === 'service_tier_capacity_exceeded')) {
-      console.log('Mistral service tier capacity exceeded, using fallback packages');
-    } else {
-      console.log('Mistral API error, using fallback packages:', e.response?.data?.message || e.message);
+    // Only log if it's not a simple missing API key (quietly use fallback)
+    if (process.env.OPENAI_API_KEY) {
+      console.log('OpenAI API error, using fallback packages:', e.response?.data?.message || e.message);
     }
     return { packages: simpleHeuristicPackages(text), source: 'fallback' };
   }
@@ -335,61 +351,199 @@ BOQ text (may be truncated):\n${truncated}`;
   }
 }
 
+// Helper function to convert rowPackageAssignments to row ranges per package per sheet
+function convertRowAssignmentsToRanges(rowPackageAssignments, allPackages) {
+  const packageRangesBySheet = {}; // packageName -> sheetName -> [rowIndices]
+  const globalRows = []; // Rows assigned to "Global" package
+  
+  // Process all sheet assignments
+  for (const [sheetName, rowAssignments] of Object.entries(rowPackageAssignments)) {
+    for (const [rowIndexStr, packageName] of Object.entries(rowAssignments)) {
+      const rowIndex = parseInt(rowIndexStr, 10);
+      
+      if (!packageName || packageName.trim() === '') continue;
+      
+      if (packageName === 'Global') {
+        globalRows.push({ sheetName, rowIndex });
+      } else {
+        if (!packageRangesBySheet[packageName]) {
+          packageRangesBySheet[packageName] = {};
+        }
+        if (!packageRangesBySheet[packageName][sheetName]) {
+          packageRangesBySheet[packageName][sheetName] = [];
+        }
+        packageRangesBySheet[packageName][sheetName].push(rowIndex);
+      }
+    }
+  }
+  
+  // Sort row indices for each package/sheet combination
+  for (const packageName of Object.keys(packageRangesBySheet)) {
+    for (const sheetName of Object.keys(packageRangesBySheet[packageName])) {
+      packageRangesBySheet[packageName][sheetName].sort((a, b) => a - b);
+    }
+  }
+  
+  return { packageRangesBySheet, globalRows };
+}
+
 // ExcelJS-based BOQ splitting functions - User selects row ranges per package
-async function splitBOQIntoPackages(fileBuffer, fileName, packages, packageRanges, headerRange) {
+async function splitBOQIntoPackages(fileBuffer, fileName, packages, packageRanges, headerRange, rowPackageAssignments = null) {
   try {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(fileBuffer);
     
     const splitFiles = [];
+    let processedRanges = {};
+    let globalRows = [];
     
-    console.log('User-selected package ranges:', packageRanges);
-    
-    // Create one file per package
-    for (const packageName of packages) {
-      const packageRange = packageRanges[packageName];
-      if (!packageRange) {
-        console.log(`No range found for package: ${packageName}`);
-        continue;
-      }
+    // If rowPackageAssignments is provided (v2), use that; otherwise use legacy packageRanges
+    if (rowPackageAssignments && Object.keys(rowPackageAssignments).length > 0) {
+      console.log('[splitBOQIntoPackages] Processing v2 row assignments:', JSON.stringify(rowPackageAssignments, null, 2));
+      const converted = convertRowAssignmentsToRanges(rowPackageAssignments, packages);
+      processedRanges = converted.packageRangesBySheet;
+      globalRows = converted.globalRows;
+      console.log('[splitBOQIntoPackages] Converted package ranges:', JSON.stringify(processedRanges, null, 2));
+      console.log('[splitBOQIntoPackages] Global rows:', globalRows);
       
-      console.log(`Processing package: ${packageName}, Range: ${packageRange.startRow}-${packageRange.endRow}`);
+      // Validate that we have rows to process
+      const totalRows = Object.values(processedRanges).reduce((sum, sheetRanges) => {
+        return sum + Object.values(sheetRanges).reduce((sheetSum, rows) => sheetSum + rows.length, 0);
+      }, 0);
+      console.log(`[splitBOQIntoPackages] Total package-specific rows: ${totalRows}, Global rows: ${globalRows.length}`);
+      
+      if (totalRows === 0 && globalRows.length === 0) {
+        console.warn('[splitBOQIntoPackages] WARNING: No rows found in rowPackageAssignments!');
+      }
+    } else {
+      // Legacy format - convert to new format
+      for (const packageName of packages) {
+        const packageRange = packageRanges[packageName];
+        if (packageRange) {
+          const sheetName = packageRange.sheet || workbook.worksheets[0].name;
+          if (!processedRanges[packageName]) {
+            processedRanges[packageName] = {};
+          }
+          // Create array of row indices from startRow to endRow
+          processedRanges[packageName][sheetName] = [];
+          for (let row = packageRange.startRow; row <= packageRange.endRow; row++) {
+            processedRanges[packageName][sheetName].push(row);
+          }
+        }
+      }
+      console.log('Processing legacy package ranges:', processedRanges);
+    }
+    
+    // Get all unique packages (excluding "Global")
+    const uniquePackages = [...new Set(packages.filter(p => p !== 'Global'))];
+    
+    // Create one file per package (excluding "Global")
+    for (const packageName of uniquePackages) {
+      const packageRowsBySheet = processedRanges[packageName];
+      if (!packageRowsBySheet || Object.keys(packageRowsBySheet).length === 0) {
+        // Still create file if there are Global rows
+        if (globalRows.length === 0) {
+          console.log(`No rows found for package: ${packageName}`);
+          continue;
+        }
+      }
       
       // Create new workbook for this package
       const packageWorkbook = new ExcelJS.Workbook();
-      const packageWorksheet = packageWorkbook.addWorksheet(packageName);
-      
       // Copy original workbook properties
       packageWorkbook.creator = workbook.creator;
       packageWorkbook.lastModifiedBy = workbook.lastModifiedBy;
       packageWorkbook.created = workbook.created;
       packageWorkbook.modified = workbook.modified;
-      
-      // Find the source sheet (use selected sheet if provided)
-      const selectedSheetName = packageRange.sheet;
-      const sourceSheet = (selectedSheetName ? workbook.getWorksheet(selectedSheetName) : null) || workbook.worksheets[0];
-      if (!sourceSheet) continue;
-      
-      // 1) Copy header range (if provided) with full formatting
-      let nextTargetRow = 1;
-      if (headerRange && headerRange.start && headerRange.end) {
-        const headerRowsCopied = await copyHeaderRange(sourceSheet, packageWorksheet, headerRange);
-        nextTargetRow = headerRowsCopied + 1;
+
+      // Build a per-sheet map of rows (include global rows)
+      const rowsBySheet = {};
+      for (const [sheetName, rowIndices] of Object.entries(packageRowsBySheet || {})) {
+        rowsBySheet[sheetName] = Array.isArray(rowIndices) ? [...rowIndices] : [];
+      }
+      for (const { sheetName, rowIndex } of globalRows) {
+        if (!rowsBySheet[sheetName]) rowsBySheet[sheetName] = [];
+        rowsBySheet[sheetName].push(rowIndex);
       }
 
-      // 2) Copy EXACT rows for this package with all formatting, starting after header
-      await copyPackageRows(sourceSheet, packageWorksheet, packageRange, nextTargetRow);
-      
+      // Prepare a flat list for metadata and sorting
+      const allPackageRows = [];
+      let totalRowsCopied = 0;
+
+      // For each source sheet, create a corresponding worksheet and copy rows
+      const sourceSheetNames = Object.keys(rowsBySheet).sort((a,b)=>a.localeCompare(b));
+      for (const srcSheetName of sourceSheetNames) {
+        const sourceSheet = workbook.getWorksheet(srcSheetName);
+        if (!sourceSheet) {
+          console.log(`Sheet ${srcSheetName} not found, skipping.`);
+          continue;
+        }
+
+        const targetWorksheet = packageWorkbook.addWorksheet(srcSheetName);
+
+        // Copy header range for this sheet, if provided
+        let nextTargetRow = 1;
+        if (headerRange && headerRange.start !== null && headerRange.end !== null) {
+          // Copy header from this source sheet (if exists)
+          const headerSourceSheet = workbook.getWorksheet(srcSheetName) || sourceSheet;
+          const headerRowsCopied = await copyHeaderRange(headerSourceSheet, targetWorksheet, headerRange);
+          nextTargetRow = headerRowsCopied + 1;
+        }
+
+        // Sort and unique the rows
+        const uniqueRows = Array.from(new Set(rowsBySheet[srcSheetName].filter(r=>typeof r==='number' && !isNaN(r)))).sort((a,b)=>a-b);
+        for (const rowIndex of uniqueRows) {
+          const srcRowObj = sourceSheet.getRow(rowIndex);
+          const tgtRowObj = targetWorksheet.getRow(nextTargetRow);
+
+          // Copy row height
+          if (srcRowObj.height) tgtRowObj.height = srcRowObj.height;
+
+          // Copy all cells
+          srcRowObj.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+            const targetCell = tgtRowObj.getCell(colNumber);
+            targetCell.value = getSafeCellValue(cell);
+            if (cell.font) targetCell.font = { ...cell.font };
+            if (cell.fill) targetCell.fill = { ...cell.fill };
+            if (cell.border) targetCell.border = { ...cell.border };
+            if (cell.alignment) targetCell.alignment = { ...cell.alignment };
+            if (cell.numFmt) targetCell.numFmt = cell.numFmt;
+            if (cell.style) targetCell.style = cell.style;
+            if (cell.protection) targetCell.protection = { ...cell.protection };
+          });
+
+          allPackageRows.push({ sheet: srcSheetName, row: rowIndex, isGlobal: (globalRows.find(g=>g.sheetName===srcSheetName && g.rowIndex===rowIndex) ? true : false) });
+          nextTargetRow++;
+          totalRowsCopied++;
+        }
+
+        // Copy column properties from source sheet
+        sourceSheet.columns.forEach((column, index) => {
+          const targetColumn = targetWorksheet.getColumn(index + 1);
+          if (column.width) targetColumn.width = column.width;
+          if (column.hidden) targetColumn.hidden = column.hidden;
+          if (column.style) targetColumn.style = column.style;
+          if (column.outlineLevel) targetColumn.outlineLevel = column.outlineLevel;
+        });
+      }
+
       // Generate buffer for this package
+      console.log(`[splitBOQIntoPackages] Package "${packageName}": Copied ${totalRowsCopied} rows across ${sourceSheetNames.length} sheet(s)`);
       const packageBuffer = await packageWorkbook.xlsx.writeBuffer();
+      
+      // Calculate min/max row for metadata
+      const allRowNumbers = allPackageRows.map(r => r.row).filter(r => !isNaN(r));
+      const minRow = allRowNumbers.length > 0 ? Math.min(...allRowNumbers) : null;
+      const maxRow = allRowNumbers.length > 0 ? Math.max(...allRowNumbers) : null;
       
       splitFiles.push({
         packageName: packageName,
         fileName: `${packageName.replace(/[^a-zA-Z0-9]/g, '_')}_BOQ.xlsx`,
         buffer: packageBuffer,
-        startRow: packageRange.startRow,
-        endRow: packageRange.endRow,
-        rowCount: packageRange.endRow - packageRange.startRow + 1
+        startRow: minRow,
+        endRow: maxRow,
+        rowCount: allPackageRows.length,
+        tableRange: JSON.stringify(allPackageRows) // Store as JSON for TableRange column
       });
     }
     
@@ -398,6 +552,51 @@ async function splitBOQIntoPackages(fileBuffer, fileName, packages, packageRange
     console.error('Error splitting BOQ into packages:', error);
     throw error;
   }
+}
+
+// Helper function to copy rows by their indices
+async function copyRowsByIndices(sourceSheet, targetSheet, rowIndices, targetStartRow) {
+  if (!rowIndices || rowIndices.length === 0) return 0;
+  
+  let targetRow = targetStartRow;
+  
+  for (const rowIndex of rowIndices) {
+    const sourceRowObj = sourceSheet.getRow(rowIndex);
+    const targetRowObj = targetSheet.getRow(targetRow);
+    
+    // Copy row height
+    if (sourceRowObj.height) {
+      targetRowObj.height = sourceRowObj.height;
+    }
+    
+    // Copy all cells in this row
+    sourceRowObj.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      const targetCell = targetRowObj.getCell(colNumber);
+      targetCell.value = getSafeCellValue(cell);
+      
+      // Copy formatting
+      if (cell.font) targetCell.font = { ...cell.font };
+      if (cell.fill) targetCell.fill = { ...cell.fill };
+      if (cell.border) targetCell.border = { ...cell.border };
+      if (cell.alignment) targetCell.alignment = { ...cell.alignment };
+      if (cell.numFmt) targetCell.numFmt = cell.numFmt;
+      if (cell.style) targetCell.style = cell.style;
+      if (cell.protection) targetCell.protection = { ...cell.protection };
+    });
+    
+    targetRow++;
+  }
+  
+  // Copy column properties
+  sourceSheet.columns.forEach((column, index) => {
+    const targetColumn = targetSheet.getColumn(index + 1);
+    if (column.width) targetColumn.width = column.width;
+    if (column.hidden) targetColumn.hidden = column.hidden;
+    if (column.style) targetColumn.style = column.style;
+    if (column.outlineLevel) targetColumn.outlineLevel = column.outlineLevel;
+  });
+  
+  return rowIndices.length;
 }
 
 async function detectPackageRowRanges(fileBuffer, fileName, packages) {
@@ -793,21 +992,80 @@ async function extractFullExcelData(fileBuffer) {
             hasContent = true;
           }
           
-          // Get formatting
-          if (cell.fill && cell.fill.fgColor) {
-            cellData.fill = {
-              fgColor: {
-                rgb: cell.fill.fgColor.rgb || 'FFFFFF'
+          // Helper to extract color (ARGB format common in ExcelJS)
+          // Defined outside if blocks so it can be used for both fill and font colors
+          const extractColor = (colorObj) => {
+            if (!colorObj) return null;
+            // ExcelJS uses ARGB format (e.g., "FFFF0000" = red, "FF0000FF" = blue)
+            // ARGB = Alpha, Red, Green, Blue (first 2 chars are alpha, next 6 are RGB)
+            if (colorObj.argb) {
+              // Return full ARGB string for frontend to handle
+              return colorObj.argb;
+            }
+            if (colorObj.rgb) {
+              return colorObj.rgb;
+            }
+            return null;
+          };
+          
+          // Get formatting - handle multiple fill formats
+          if (cell.fill) {
+            const fillData = {};
+            
+            // Primary fill color (fgColor) - this is the cell background
+            const fgColor = extractColor(cell.fill.fgColor);
+            if (fgColor) {
+              fillData.fgColor = { rgb: fgColor };
+            }
+            
+            // Background color (bgColor) - usually for patterns
+            const bgColor = extractColor(cell.fill.bgColor);
+            if (bgColor) {
+              fillData.bgColor = { rgb: bgColor };
+            }
+            
+            // Pattern fill
+            if (cell.fill.pattern) {
+              const patternFillData = {
+                pattern: cell.fill.pattern
+              };
+              
+              const patternFgColor = extractColor(cell.fill.patternFill?.fgColor);
+              if (patternFgColor) {
+                patternFillData.fgColor = { rgb: patternFgColor };
               }
-            };
+              
+              const patternBgColor = extractColor(cell.fill.patternFill?.bgColor);
+              if (patternBgColor) {
+                patternFillData.bgColor = { rgb: patternBgColor };
+              }
+              
+              if (patternFgColor || patternBgColor) {
+                fillData.patternFill = patternFillData;
+              }
+            }
+            
+            // Only add fill if we have at least one color
+            if (Object.keys(fillData).length > 0) {
+              cellData.fill = fillData;
+            }
           }
           
           if (cell.font) {
+            // Extract font color (ARGB format)
+            let fontColor = null;
+            if (cell.font.color) {
+              const color = extractColor(cell.font.color);
+              if (color) {
+                fontColor = { rgb: color };
+              }
+            }
+            
             cellData.font = {
               bold: cell.font.bold || false,
               italic: cell.font.italic || false,
               underline: cell.font.underline || false,
-              color: cell.font.color ? { rgb: cell.font.color.rgb } : null,
+              color: fontColor,
               size: cell.font.size || 11,
               name: cell.font.name || 'Arial'
             };
@@ -936,9 +1194,22 @@ function parseA1Range(range) {
 }
 
 async function copyHeaderRange(sourceSheet, targetSheet, headerRange) {
-  const parsed = parseA1Range(headerRange);
-  if (!parsed) return 0;
-  const { startCol, startRow, endCol, endRow } = parsed;
+  // Handle both A1 notation and numeric row ranges
+  let startRow, endRow, startCol, endCol;
+  
+  if (headerRange && typeof headerRange.start === 'number' && typeof headerRange.end === 'number') {
+    // Numeric row format: { start: 1, end: 5 } means rows 1-5, all columns
+    startRow = headerRange.start;
+    endRow = headerRange.end;
+    startCol = 1; // Start from column A
+    endCol = sourceSheet.columnCount || 100; // Use all columns or default to 100
+  } else {
+    // A1 notation format: parse it
+    const parsed = parseA1Range(headerRange);
+    if (!parsed) return 0;
+    ({ startCol, startRow, endCol, endRow } = parsed);
+  }
+  
   let targetRowIndex = 1;
 
   for (let r = startRow; r <= endRow; r++) {
@@ -1420,14 +1691,43 @@ function createFallbackBOQBlocks(text, packages) {
   return blocks;
 }
 
+function compactRowsToRangeString(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return '';
+  const sorted = Array.from(new Set(rows.filter(n => typeof n === 'number' && !isNaN(n)))).sort((a,b)=>a-b);
+  const parts = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i];
+    if (cur === prev + 1) {
+      prev = cur;
+      continue;
+    }
+    parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+    start = prev = cur;
+  }
+  parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+  return parts.join(',');
+}
+
 const boqController = {
   // GET /api/boq/tender/:tenderId
   listTenderBoQ: async (req, res) => {
     try {
       const { tenderId } = req.params;
       const pool = await getConnectedPool();
+      
+      // Convert tenderId to integer
+      const tenderIdInt = parseInt(tenderId, 10);
+      if (isNaN(tenderIdInt)) {
+        console.error(`[listTenderBoQ] Invalid TenderID provided: ${tenderId}`);
+        return res.status(400).json({ error: 'Invalid tender ID', items: [] });
+      }
+      
+      console.log(`[listTenderBoQ] Fetching BOQ files for TenderID: ${tenderIdInt} (original: ${tenderId})`);
+      
       const result = await pool.request()
-        .input('TenderID', tenderId)
+        .input('TenderID', tenderIdInt)
         .query(`
           SELECT 
             b.BoQID,
@@ -1443,10 +1743,42 @@ const boqController = {
           WHERE b.TenderID = @TenderID
           ORDER BY b.UploadedAt DESC, b.BoQID DESC
         `);
+      
+      console.log(`[listTenderBoQ] Found ${result.recordset.length} BOQ record(s) for TenderID ${tenderIdInt}`);
+      
+      // Log details if no records found - help debug
+      if (result.recordset.length === 0) {
+        // Check if tenderBoQ table has any records at all for this tender
+        const checkResult = await pool.request()
+          .input('TenderID', tenderIdInt)
+          .query(`
+            SELECT COUNT(*) as TotalCount 
+            FROM tenderBoQ 
+            WHERE TenderID = @TenderID
+          `);
+        console.log(`[listTenderBoQ] Database check: ${checkResult.recordset[0].TotalCount} total tenderBoQ records for TenderID ${tenderIdInt}`);
+        
+        // Also check if files exist for this tender
+        const fileCheckResult = await pool.request()
+          .input('TenderID', tenderIdInt)
+          .query(`
+            SELECT COUNT(*) as FileCount 
+            FROM tenderFile 
+            WHERE DocID = @TenderID AND ConnectionTable = 'tenderTender'
+          `);
+        console.log(`[listTenderBoQ] Database check: ${fileCheckResult.recordset[0].FileCount} total files for TenderID ${tenderIdInt}`);
+      } else {
+        // Log the records found for debugging
+        result.recordset.forEach((record, idx) => {
+          console.log(`[listTenderBoQ] Record ${idx + 1}: BoQID=${record.BoQID}, FileID=${record.FileID}, DisplayName=${record.DisplayName || 'N/A'}`);
+        });
+      }
+      
       return res.json({ success: true, items: result.recordset });
     } catch (error) {
-      console.error('Error listing tender BOQ:', error);
-      res.status(500).json({ error: 'Failed to list tender BOQ' });
+      console.error('[listTenderBoQ] Error listing tender BOQ:', error);
+      console.error('[listTenderBoQ] Error stack:', error.stack);
+      res.status(500).json({ error: 'Failed to list tender BOQ', message: error.message });
     }
   },
   // GET /api/boq/:tenderId/:fileId/packages/:packageName/rfq
@@ -1506,7 +1838,17 @@ const boqController = {
       const { CompanyID, RFQDate, QuotationReturn, Value, SubbieRef, Notes } = req.body || {};
       const userId = req.user?.userId || req.user?.id || null;
 
+      console.log(`📝 [createPackageRFQ] Request received:`, {
+        tenderId,
+        fileId,
+        packageName,
+        CompanyID,
+        RFQDate,
+        userId
+      });
+
       if (!CompanyID && !req.body?.CompanyName) {
+        console.error('❌ [createPackageRFQ] Missing CompanyID and CompanyName');
         return res.status(400).json({ error: 'CompanyID or CompanyName is required' });
       }
 
@@ -1533,9 +1875,12 @@ const boqController = {
       }
 
       // Resolve PackageID
+      console.log(`🔍 [createPackageRFQ] Looking up package: TenderID=${tenderId}, FileID=${fileId}, PackageName=${packageName}`);
+      
+      // First try with FileID
       let pkgRes = await pool.request()
-        .input('TenderID', tenderId)
-        .input('FileID', fileId)
+        .input('TenderID', parseInt(tenderId))
+        .input('FileID', parseInt(fileId))
         .input('PackageName', packageName)
         .query(`
           SELECT TOP 1 PackageID
@@ -1544,27 +1889,75 @@ const boqController = {
           ORDER BY PackageID DESC
         `);
       let packageId = pkgRes.recordset[0]?.PackageID;
+      
+      // Log what packages exist for this file
       if (!packageId) {
-        // Fallback: ignore FileID
+        const allPackagesRes = await pool.request()
+          .input('TenderID', parseInt(tenderId))
+          .input('FileID', parseInt(fileId))
+          .query(`
+            SELECT PackageID, PackageName
+            FROM tenderBoQPackages
+            WHERE TenderID = @TenderID AND FileID = @FileID
+            ORDER BY PackageID DESC
+          `);
+        console.log(`📦 [createPackageRFQ] Packages for FileID ${fileId}:`, allPackagesRes.recordset.map(p => p.PackageName));
+      }
+      
+      if (!packageId) {
+        // Fallback: ignore FileID (maybe package was created with different FileID)
+        console.log(`🔍 [createPackageRFQ] Trying lookup without FileID constraint...`);
         pkgRes = await pool.request()
-          .input('TenderID', tenderId)
+          .input('TenderID', parseInt(tenderId))
           .input('PackageName', packageName)
           .query(`
-            SELECT TOP 1 PackageID
+            SELECT TOP 1 PackageID, FileID
             FROM tenderBoQPackages
             WHERE TenderID = @TenderID AND PackageName = @PackageName
             ORDER BY PackageID DESC
           `);
         packageId = pkgRes.recordset[0]?.PackageID;
+        if (packageId) {
+          console.log(`⚠️ [createPackageRFQ] Found package with different FileID: ${pkgRes.recordset[0].FileID}`);
+        }
       }
+      
+      // If still not found, try to auto-create the package
       if (!packageId) {
-        return res.status(404).json({ error: 'Package not found' });
+        console.log(`🆕 [createPackageRFQ] Package not found, attempting to auto-create...`);
+        try {
+          const createRes = await pool.request()
+            .input('TenderID', parseInt(tenderId))
+            .input('FileID', parseInt(fileId))
+            .input('PackageName', packageName)
+            .query(`
+              INSERT INTO tenderBoQPackages (TenderID, FileID, PackageName, CreatedAt, UpdatedAt)
+              OUTPUT INSERTED.PackageID
+              VALUES (@TenderID, @FileID, @PackageName, SYSUTCDATETIME(), SYSUTCDATETIME())
+            `);
+          packageId = createRes.recordset[0]?.PackageID;
+          console.log(`✅ [createPackageRFQ] Auto-created package: PackageID=${packageId}`);
+        } catch (createError) {
+          console.error(`❌ [createPackageRFQ] Failed to auto-create package:`, createError);
+          console.error(`❌ [createPackageRFQ] Package not found and could not be created: TenderID=${tenderId}, FileID=${fileId}, PackageName=${packageName}`);
+          return res.status(404).json({ 
+            error: 'Package not found. Please save package ranges first via the range selector page.',
+            details: `Package "${packageName}" does not exist for TenderID ${tenderId}, FileID ${fileId}`
+          });
+        }
       }
+
+      console.log(`✅ [createPackageRFQ] Found PackageID: ${packageId} for package "${packageName}"`);
+
+      // Ensure RFQDate is set to today if not provided
+      const rfqDateValue = RFQDate ? new Date(RFQDate) : new Date();
+      
+      console.log(`📅 [createPackageRFQ] Using RFQDate:`, rfqDateValue);
 
       const rfqIns = await pool.request()
         .input('CompanyID', companyId)
         .input('PackageID', packageId)
-        .input('RFQDate', RFQDate ? new Date(RFQDate) : null)
+        .input('RFQDate', rfqDateValue)
         .input('QuotationReturn', QuotationReturn ? new Date(QuotationReturn) : null)
         .input('Value', typeof Value === 'number' ? Value : (Value ? Number(Value) : null))
         .input('AddBy', userId)
@@ -1576,10 +1969,17 @@ const boqController = {
           VALUES (@CompanyID, @PackageID, @RFQDate, @QuotationReturn, @Value, @AddBy, SYSUTCDATETIME(), SYSUTCDATETIME(), @SubbieRef, @Notes)
         `);
 
-      return res.json({ success: true, rfqId: rfqIns.recordset[0].BOQRFQID });
+      const rfqId = rfqIns.recordset[0]?.BOQRFQID;
+      console.log(`✅ [createPackageRFQ] RFQ created successfully: BOQRFQID=${rfqId}, CompanyID=${companyId}, PackageID=${packageId}`);
+
+      return res.json({ success: true, rfqId });
     } catch (error) {
-      console.error('Error creating package RFQ:', error);
-      res.status(500).json({ error: 'Failed to create RFQ' });
+      console.error('❌ [createPackageRFQ] Error creating package RFQ:', error);
+      console.error('Error details:', {
+        message: error.message,
+        stack: error.stack
+      });
+      res.status(500).json({ error: 'Failed to create RFQ', message: error.message });
     }
   },
   // PUT /api/boq/:tenderId/:fileId/packages/:packageName/rfq/:rfqId
@@ -1653,18 +2053,16 @@ const boqController = {
       }
 
       const fileRow = fileRes.recordset[0];
-      // Optional: ensure belongs to tender
       if (tenderId && fileRow.DocID && String(fileRow.DocID) !== String(tenderId)) {
-        // Not blocking, but informatively continue
         console.warn('BOQ file DocID differs from requested tenderId');
       }
 
-      // First check tenderBoQPackages for saved packages
+      // First check tenderBoQPackages for saved packages (with optional compact TableRange)
       const savedPkRes = await pool.request()
         .input('TenderID', tenderId)
         .input('FileID', fileId)
         .query(`
-          SELECT PackageName
+          SELECT PackageName, TableRange
           FROM tenderBoQPackages
           WHERE TenderID = @TenderID AND FileID = @FileID
           ORDER BY PackageID
@@ -1672,32 +2070,72 @@ const boqController = {
 
       if (savedPkRes.recordset.length > 0) {
         const savedPackages = savedPkRes.recordset.map(r => r.PackageName).filter(Boolean);
-        if (savedPackages.length > 0) {
-          return res.json({
-            success: true,
-            tenderId,
-            fileId,
-            packages: savedPackages,
-            source: 'stored'
+        const packageRangesCompact = {};
+
+        // Helper to expand a compact range string (e.g. "1-5,9,15-20") into array of ints
+        const expandRangeString = (str) => {
+          if (!str || typeof str !== 'string') return [];
+          return str.split(',').map(s => s.trim()).filter(Boolean).flatMap(part => {
+            if (/^\d+-\d+$/.test(part)) {
+              const [a, b] = part.split('-').map(n => parseInt(n, 10));
+              if (!isNaN(a) && !isNaN(b) && a <= b) {
+                const arr = [];
+                for (let i = a; i <= b; i++) arr.push(i);
+                return arr;
+              }
+              return [];
+            }
+            const n = parseInt(part, 10);
+            return isNaN(n) ? [] : [n];
           });
+        };
+
+        // Build rowPackageAssignments: sheetName -> { rowIndex: packageName | 'Global' }
+        const rowPackageAssignments = {};
+        for (const rec of savedPkRes.recordset) {
+          const pkg = rec.PackageName;
+          let compactJson = null;
+          try { compactJson = rec.TableRange ? JSON.parse(rec.TableRange) : null; } catch(_) { compactJson = null; }
+          if (compactJson && typeof compactJson === 'object') {
+            for (const [key, value] of Object.entries(compactJson)) {
+              if (key === 'Global' && value && typeof value === 'object') {
+                // Global rows
+                for (const [sheetName, compactStr] of Object.entries(value)) {
+                  const rows = expandRangeString(compactStr);
+                  if (!rowPackageAssignments[sheetName]) rowPackageAssignments[sheetName] = {};
+                  rows.forEach(r => { rowPackageAssignments[sheetName][r] = 'Global'; });
+                }
+              } else {
+                // Package-specific rows per sheet
+                const sheetName = key;
+                const compactStr = value;
+                const rows = typeof compactStr === 'string' ? expandRangeString(compactStr) : [];
+                if (!rowPackageAssignments[sheetName]) rowPackageAssignments[sheetName] = {};
+                rows.forEach(r => { rowPackageAssignments[sheetName][r] = pkg; });
+              }
+            }
+          }
+          packageRangesCompact[pkg] = compactJson; // includes Global if present
         }
+
+        return res.json({
+          success: true,
+          tenderId,
+          fileId,
+          packages: savedPackages,
+          source: 'stored',
+          packageRangesCompact,
+          rowPackageAssignments
+        });
       }
 
-      const text = await getBoqTextForFile(fileRow);
-      
-      // Try OpenAI first, then fallback to Mistral
-      let result = await callOpenAIForPackages(text);
-      if (result.source === 'fallback') {
-        console.log('OpenAI failed, trying Mistral for packages');
-        result = await callMistralForPackages(text);
-      }
-
+      // No stored packages: return empty
       return res.json({
         success: true,
         tenderId,
         fileId,
-        packages: result.packages,
-        source: result.source
+        packages: [],
+        source: 'manual'
       });
     } catch (error) {
       console.error('Error proposing BOQ breakdown:', error);
@@ -1949,14 +2387,12 @@ const boqController = {
       const stream = await downloadFile(fileRow.BlobPath);
       const fileBuffer = await streamToBuffer(stream);
       
-      // Get AI to parse BOQ blocks
+      // Try AI parsing (fallbacks preserved)
       let blocksResult = await callOpenAIForBOQBlocks(await getBoqTextForFile(fileRow), packages);
       if (blocksResult.blocks.length === 0) {
         console.log('OpenAI failed to parse BOQ blocks, trying Mistral');
         blocksResult = await callMistralForBOQBlocks(await getBoqTextForFile(fileRow), packages);
       }
-      
-      // If both AI services failed, use fallback
       if (blocksResult.blocks.length === 0) {
         console.log('Both AI services failed to parse BOQ blocks, using fallback parser');
         const fallbackBlocks = createFallbackBOQBlocks(await getBoqTextForFile(fileRow), packages);
@@ -1966,129 +2402,60 @@ const boqController = {
         blocksResult.blocks = fallbackBlocks;
         blocksResult.source = 'fallback';
       }
-
-      // Split BOQ into separate Excel files (one per package)
+      
+      // Split using v2/v1 ranges
       const splitFiles = await splitBOQIntoPackages(
         fileBuffer,
         fileRow.DisplayName,
         packages,
-        req.body.packageRanges,
-        req.body.headerRange
+        req.body.packageRanges || {},
+        req.body.headerRange,
+        req.body.rowPackageAssignments || null
       );
-      
-      // Place outputs in the SAME folder as the original BOQ file; fallback to tender root
-      let targetFolderId = fileRow.FolderID || null;
-      let targetFolderPath = null;
-      if (targetFolderId) {
-        const folderRes = await pool.request()
-          .input('FolderID', targetFolderId)
-          .query(`SELECT FolderPath FROM tenderFolder WHERE FolderID = @FolderID`);
-        targetFolderPath = folderRes.recordset[0]?.FolderPath || null;
-      }
-      // If we have a path but no FolderID yet, try to resolve FolderID by path
-      if (!targetFolderId && targetFolderPath) {
-        const folderByPath = await pool.request()
-          .input('FolderPath', targetFolderPath)
-          .query(`SELECT TOP 1 FolderID FROM tenderFolder WHERE FolderPath = @FolderPath`);
-        if (folderByPath.recordset[0]?.FolderID) {
-          targetFolderId = folderByPath.recordset[0].FolderID;
-        }
-      }
-      if (!targetFolderPath) {
-        const rootRes = await pool.request()
-          .input('DocID', tenderId)
-          .input('ConnectionTable', fileRow.ConnectionTable || 'tenderTender')
-          .query(`
-            SELECT TOP 1 FolderID, FolderPath FROM tenderFolder
-            WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID IS NULL
-            ORDER BY FolderID ASC
-          `);
-        const rootFolder = rootRes.recordset[0];
-        if (rootFolder) {
-          targetFolderId = rootFolder.FolderID;
-          targetFolderPath = rootFolder.FolderPath;
-        } else {
-          // final fallback path if no folder rows exist
-          targetFolderPath = `/Tender/${tenderId}`;
-        }
-      }
-      // Final guard: if still no FolderID but we have a path, attempt one more lookup
-      if (!targetFolderId && targetFolderPath) {
-        const folderByPath2 = await pool.request()
-          .input('FolderPath', targetFolderPath)
-          .query(`SELECT TOP 1 FolderID FROM tenderFolder WHERE FolderPath = @FolderPath`);
-        if (folderByPath2.recordset[0]?.FolderID) {
-          targetFolderId = folderByPath2.recordset[0].FolderID;
-        }
-      }
 
-      // Upload split files to blob storage and save to database
+      // Upload generated files (overwrite existing by name in same folder; avoid duplicate rows)
       const uploadedFiles = [];
-      const ranges = req.body.packageRanges || {};
       for (const splitFile of splitFiles) {
         try {
-          const uniqueName = `${Date.now()}_${splitFile.fileName}`;
-          const basePath = (targetFolderPath || `/Tender/${tenderId}`).replace(/^\/+/, '');
-          const normalizedBase = basePath.replace(/^\/+/, '').replace(/\/+/g, '/');
-          const blobPath = `${normalizedBase}/${uniqueName}`;
-          await uploadFile(blobPath, Buffer.from(splitFile.buffer), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-
-          // Insert into tenderFile for later access
-          const addBy = req.user?.UserID || null;
           const displayName = splitFile.fileName;
-          const size = Buffer.byteLength(splitFile.buffer);
-          const contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+          const buffer = splitFile.buffer;
 
-          const insertRes = await pool.request()
-            .input('BlobPath', blobPath)
-            .input('DisplayName', displayName)
-            .input('Size', size)
-            .input('ContentType', contentType)
-            .input('AddBy', addBy)
+          // Determine folder to place the split file (same as original or tender root)
+          let targetFolderId = fileRow.FolderID || null;
+          if (!targetFolderId) {
+            const rootRes = await pool.request()
+              .input('DocID', tenderId)
+              .query(`SELECT TOP 1 FolderID FROM tenderFolder WHERE DocID = @DocID ORDER BY FolderID ASC`);
+            targetFolderId = rootRes.recordset[0]?.FolderID || null;
+          }
+
+          const userId = req.user?.UserID || null;
+
+          // Check if a file with this name already exists in the same folder (not deleted)
+          const existingRes = await pool.request()
             .input('FolderID', targetFolderId)
-            .input('DocID', tenderId)
-            .input('ConnectionTable', fileRow.ConnectionTable || 'tenderTender')
+            .input('DisplayName', displayName)
             .query(`
-              INSERT INTO tenderFile (BlobPath, DisplayName, Size, ContentType, AddBy, FolderID, DocID, ConnectionTable, UploadedOn, CreatedAt, Status, IsDeleted)
-              OUTPUT INSERTED.FileID
-              VALUES (@BlobPath, @DisplayName, @Size, @ContentType, @AddBy, @FolderID, @DocID, @ConnectionTable, SYSDATETIME(), SYSDATETIME(), 1, 0)
+              SELECT TOP 1 FileID, BlobPath, ContentType
+              FROM tenderFile
+              WHERE FolderID = @FolderID AND DisplayName = @DisplayName AND (IsDeleted = 0 OR IsDeleted IS NULL)
+              ORDER BY UploadedOn DESC
             `);
 
-          const newFileId = insertRes.recordset[0]?.FileID;
-
-          // Record package info for the generated file (not the original)
-          try {
-            const r = ranges[splitFile.packageName] || {};
-            // Try to reference the source BOQ row: pick one BOQID from original file matching the package
-            let sourceBoqId = null;
-            try {
-              // Find a BOQ row by Tender + Source File + Package (no blocks table dependency)
-              const boqIdRes = await pool.request()
-                .input('TenderID', tenderId)
-                .input('SourceFileID', fileId)
-                .input('PackageName', splitFile.packageName)
-                .query(`
-                  SELECT TOP 1 BoQID
-                  FROM tenderBoQ
-                  WHERE TenderID = @TenderID AND FileID = @SourceFileID AND Package = @PackageName
-                  ORDER BY BoQID ASC
-                `);
-              sourceBoqId = boqIdRes.recordset[0]?.BoQID || null;
-            } catch (_) {}
-            await pool.request()
-              .input('TenderID', tenderId)
-              .input('FileID', newFileId)
-              .input('PackageName', splitFile.packageName)
-              .input('SheetName', r.sheet || null)
-              .input('RangeStart', typeof r.startRow === 'number' ? r.startRow : null)
-              .input('RangeFinish', typeof r.endRow === 'number' ? r.endRow : null)
-              .input('BoQID', sourceBoqId)
-              .query(`
-                INSERT INTO tenderBoQPackages (TenderID, FileID, PackageName, CreatedAt, UpdatedAt, SheetName, RangeStart, RangeFinish, BoQID)
-                VALUES (@TenderID, @FileID, @PackageName, SYSDATETIME(), SYSDATETIME(), @SheetName, @RangeStart, @RangeFinish, @BoQID)
-              `);
-          } catch (pkgErr) {
-            console.error('Error inserting tenderBoQPackages for generated file:', pkgErr.message);
+          let newFileId, blobPath, contentType;
+          if (existingRes.recordset.length > 0) {
+            const existing = existingRes.recordset[0];
+            // Overwrite existing file
+            const overwriteResult = await overwriteExistingFile(existing.FileID, existing.BlobPath, buffer, existing.ContentType);
+            newFileId = overwriteResult.fileId;
+            blobPath = overwriteResult.blobPath;
+            contentType = overwriteResult.contentType;
+          } else {
+            // Create new file
+            const uploaded = await uploadBufferToFolder(buffer, targetFolderId, displayName, tenderId, userId);
+            newFileId = uploaded.fileId;
+            blobPath = uploaded.blobPath;
+            contentType = uploaded.contentType;
           }
 
           uploadedFiles.push({
@@ -2106,8 +2473,6 @@ const boqController = {
         }
       }
 
-      // (No longer writing package ranges against the original file)
-
       return res.json({
         success: true,
         message: `BOQ split into ${uploadedFiles.length} files successfully`,
@@ -2124,47 +2489,480 @@ const boqController = {
   updatePackages: async (req, res) => {
     try {
       const { tenderId, fileId } = req.params;
-      const { packages, packageRanges } = req.body;
+      const { packages, packageRanges, rowPackageAssignments } = req.body;
       
       if (!packages || !Array.isArray(packages)) {
         return res.status(400).json({ error: 'Packages array is required' });
       }
 
       const pool = await getConnectedPool();
-      
-      // Replace packages for this TenderID/FileID in tenderBoQPackages
-      await pool.request()
+
+      // Treat Global as frontend-only (do not persist as a separate package)
+      const packagesToStore = packages.filter(p => p !== 'Global');
+
+      // Get existing packages to preserve PackageIDs for RFQ relationships
+      const existingPkgsRes = await pool.request()
         .input('TenderID', tenderId)
         .input('FileID', fileId)
-        .query(`DELETE FROM tenderBoQPackages WHERE TenderID = @TenderID AND FileID = @FileID`);
+        .query(`
+          SELECT PackageID, PackageName
+          FROM tenderBoQPackages
+          WHERE TenderID = @TenderID AND FileID = @FileID
+        `);
+      
+      const existingPkgs = {};
+      existingPkgsRes.recordset.forEach(pkg => {
+        existingPkgs[pkg.PackageName] = pkg.PackageID;
+      });
 
-      for (const name of packages) {
-        const range = packageRanges ? packageRanges[name] : null;
-        const sheetName = range?.sheet || null;
-        const rangeStart = typeof range?.startRow === 'number' ? range.startRow : null;
-        const rangeFinish = typeof range?.endRow === 'number' ? range.endRow : null;
-        await pool.request()
-          .input('TenderID', tenderId)
-          .input('FileID', fileId)
-          .input('PackageName', name)
-          .input('SheetName', sheetName)
-          .input('RangeStart', rangeStart)
-          .input('RangeFinish', rangeFinish)
-          .query(`
-            INSERT INTO tenderBoQPackages (TenderID, FileID, PackageName, CreatedAt, UpdatedAt, SheetName, RangeStart, RangeFinish)
-            VALUES (@TenderID, @FileID, @PackageName, SYSUTCDATETIME(), SYSUTCDATETIME(), @SheetName, @RangeStart, @RangeFinish)
-          `);
+      // Identify packages to remove (exist in DB but not in new list)
+      const packagesToRemove = Object.keys(existingPkgs).filter(name => !packagesToStore.includes(name));
+      
+      // Remove packages that are no longer in the list (but only if they have no RFQs)
+      for (const packageName of packagesToRemove) {
+        const packageId = existingPkgs[packageName];
+        // Check if package has RFQs
+        const rfqCheck = await pool.request()
+          .input('PackageID', packageId)
+          .query(`SELECT COUNT(*) as RfqCount FROM tenderPackageRFQ WHERE PackageID = @PackageID`);
+        
+        if (rfqCheck.recordset[0].RfqCount === 0) {
+          // No RFQs, safe to delete
+          await pool.request()
+            .input('PackageID', packageId)
+            .query(`DELETE FROM tenderBoQPackages WHERE PackageID = @PackageID`);
+        } else {
+          // Has RFQs, keep the package but mark it as inactive or just leave it
+          // For now, we'll keep it but update it to match current ranges
+          console.log(`[updatePackages] Keeping package "${packageName}" (PackageID: ${packageId}) because it has ${rfqCheck.recordset[0].RfqCount} RFQ(s)`);
+        }
+      }
+
+      // Collect Global rows (to be included in all packages)
+      const globalRowsBySheet = {};
+      if (rowPackageAssignments && Object.keys(rowPackageAssignments).length > 0) {
+        for (const [sheetName, rowAssignments] of Object.entries(rowPackageAssignments)) {
+          for (const [rowIndexStr, assignedPackage] of Object.entries(rowAssignments)) {
+            if (assignedPackage === 'Global') {
+              const rowIndex = parseInt(rowIndexStr, 10);
+              if (!isNaN(rowIndex)) {
+                if (!globalRowsBySheet[sheetName]) globalRowsBySheet[sheetName] = [];
+                globalRowsBySheet[sheetName].push(rowIndex);
+              }
+            }
+          }
+        }
+      }
+
+      // Save each package with compact TableRange JSON in tenderBoQPackages.TableRange
+      for (const packageName of packagesToStore) {
+        const perSheetRows = {};
+
+        if (rowPackageAssignments && Object.keys(rowPackageAssignments).length > 0) {
+          // v2 model - gather package rows per sheet and merge Global
+          for (const [sheetName, rowAssignments] of Object.entries(rowPackageAssignments)) {
+            for (const [rowIndexStr, assignedPackage] of Object.entries(rowAssignments)) {
+              if (assignedPackage === packageName) {
+                const rowIndex = parseInt(rowIndexStr, 10);
+                if (!isNaN(rowIndex)) {
+                  if (!perSheetRows[sheetName]) perSheetRows[sheetName] = [];
+                  perSheetRows[sheetName].push(rowIndex);
+                }
+              }
+            }
+          }
+        } else if (packageRanges && packageRanges[packageName]) {
+          // Legacy single range
+          const range = packageRanges[packageName];
+          if (range.sheet && typeof range.startRow === 'number' && typeof range.endRow === 'number') {
+            perSheetRows[range.sheet] = [];
+            for (let r = range.startRow; r <= range.endRow; r++) perSheetRows[range.sheet].push(r);
+          }
+        }
+
+        // Merge Global rows
+        for (const [sheet, rows] of Object.entries(globalRowsBySheet)) {
+          if (!perSheetRows[sheet]) perSheetRows[sheet] = [];
+          perSheetRows[sheet].push(...rows);
+        }
+
+        // Build compact JSON { sheet: "1-5,9,15-150", Global: { sheet: "..." } }
+        const compact = {};
+        for (const [sheet, rows] of Object.entries(perSheetRows)) {
+          compact[sheet] = compactRowsToRangeString(rows);
+        }
+        const globalCompact = {};
+        for (const [sheet, rows] of Object.entries(globalRowsBySheet)) {
+          globalCompact[sheet] = compactRowsToRangeString(rows);
+        }
+        const combined = Object.keys(globalCompact).length > 0 ? { ...compact, Global: globalCompact } : compact;
+        const compactJson = Object.keys(combined).length > 0 ? JSON.stringify(combined) : null;
+
+        // Check if package already exists
+        if (existingPkgs[packageName]) {
+          // Update existing package to preserve PackageID and RFQ relationships
+          await pool.request()
+            .input('PackageID', existingPkgs[packageName])
+            .input('TableRange', compactJson)
+            .query(`
+              UPDATE tenderBoQPackages
+              SET TableRange = @TableRange, UpdatedAt = SYSDATETIME()
+              WHERE PackageID = @PackageID
+            `);
+        } else {
+          // Insert new package
+          await pool.request()
+            .input('TenderID', tenderId)
+            .input('FileID', fileId)
+            .input('PackageName', packageName)
+            .input('TableRange', compactJson)
+            .query(`
+              INSERT INTO tenderBoQPackages (TenderID, FileID, PackageName, CreatedAt, UpdatedAt, TableRange)
+              VALUES (@TenderID, @FileID, @PackageName, SYSDATETIME(), SYSDATETIME(), @TableRange)
+            `);
+        }
       }
 
       return res.json({
         success: true,
-        message: `Updated ${packages.length} packages successfully`,
-        packages,
-        packageRanges: packageRanges || null
+        message: `Updated ${packagesToStore.length} packages successfully`,
+        packages: packagesToStore
       });
     } catch (error) {
       console.error('Error updating packages:', error);
       res.status(500).json({ error: 'Failed to update packages' });
+    }
+  },
+
+  // GET /api/boq/:tenderId/:fileId/split-files
+  getSplitFiles: async (req, res) => {
+    try {
+      const { tenderId, fileId } = req.params;
+      const pool = await getConnectedPool();
+
+      // Get the original BOQ file info
+      const fileRes = await pool.request()
+        .input('FileID', fileId)
+        .query(`
+          SELECT FileID, FolderID, DisplayName, UploadedOn
+          FROM tenderFile
+          WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)
+        `);
+
+      if (fileRes.recordset.length === 0) {
+        return res.status(404).json({ error: 'BOQ file not found', items: [] });
+      }
+
+      const originalFile = fileRes.recordset[0];
+      const folderId = originalFile.FolderID;
+
+      // Find split files by:
+      // 1. Files in the same folder that match the pattern *_BOQ.xlsx
+      // 2. AND were created after the original BOQ file
+      // 3. OR files linked via tenderBoQPackages with BoQID matching this file's BOQ entries
+      
+      // First, get any BOQID(s) associated with this file
+      // Simple folder-based discovery: all split files in same folder matching pattern
+      const splitFilesQuery = await pool.request()
+        .input('FolderID', folderId)
+        .input('FileID', fileId)
+        .query(`
+          SELECT
+            f.FileID,
+            f.DisplayName,
+            f.Size,
+            f.ContentType,
+            f.UploadedOn,
+            f.BlobPath,
+            NULL as PackageName,
+            NULL as TableRange
+          FROM tenderFile f
+          WHERE f.FolderID = @FolderID
+            AND f.DisplayName LIKE '%_BOQ.xlsx'
+            AND f.FileID != @FileID
+            AND (f.IsDeleted = 0 OR f.IsDeleted IS NULL)
+          ORDER BY f.UploadedOn DESC
+        `);
+
+      const splitFiles = splitFilesQuery.recordset.map(file => ({
+        fileId: file.FileID,
+        fileName: file.DisplayName,
+        size: file.Size,
+        contentType: file.ContentType,
+        uploadedAt: file.UploadedOn,
+        blobPath: file.BlobPath,
+        packageName: file.PackageName || null,
+        tableRange: file.TableRange || null
+      }));
+
+      return res.json({
+        success: true,
+        items: splitFiles
+      });
+    } catch (error) {
+      console.error('Error fetching split files:', error);
+      res.status(500).json({ error: 'Failed to fetch split files', items: [] });
+    }
+  },
+
+  // GET /api/boq/:tenderId/:fileId/packages/dashboard
+  getPackageDashboardStats: async (req, res) => {
+    try {
+      const { tenderId, fileId } = req.params;
+      const pool = await getConnectedPool();
+
+      // Read packages from tenderBoQPackages for the original file
+      const packagesQuery = await pool.request()
+        .input('TenderID', parseInt(tenderId))
+        .input('FileID', parseInt(fileId))
+        .query(`
+          SELECT DISTINCT PackageName, PackageID
+          FROM tenderBoQPackages
+          WHERE TenderID = @TenderID AND FileID = @FileID
+          ORDER BY PackageName
+        `);
+
+      const packageRecords = packagesQuery.recordset;
+      if (packageRecords.length === 0) {
+        return res.json({ success: true, packages: [] });
+      }
+
+      // For each package, get RFQ stats using PackageID
+      const statsPromises = packageRecords.map(async (pkgRecord) => {
+        const packageName = pkgRecord.PackageName;
+        const packageId = pkgRecord.PackageID;
+        
+        try {
+          const rfqRes = await pool.request()
+            .input('PackageID', packageId)
+            .query(`
+              SELECT r.BOQRFQID, r.CompanyID, c.CompanyName AS CompanyName, r.PackageID, r.RFQDate, r.QuotationReturn, r.Value, r.AddBy, r.CreatedDate, r.UpdatedDate, r.SubbieRef, r.Notes
+              FROM tenderPackageRFQ r
+              LEFT JOIN tenderCompany c ON c.CompanyID = r.CompanyID
+              WHERE r.PackageID = @PackageID
+              ORDER BY r.CreatedDate DESC
+            `);
+
+          const items = rfqRes.recordset || [];
+          const sent = items.filter((item) => item.RFQDate).length;
+          const returned = items.filter((item) => item.QuotationReturn).length;
+          const returnedQuotes = items
+            .filter((item) => item.QuotationReturn && item.Value)
+            .map((item) => {
+              const value = typeof item.Value === 'number' ? item.Value : Number(item.Value);
+              return isNaN(value) || value <= 0 ? null : value;
+            })
+            .filter((v) => v !== null);
+          const minValue = returnedQuotes.length > 0 ? Math.min(...returnedQuotes) : 0;
+          const maxValue = returnedQuotes.length > 0 ? Math.max(...returnedQuotes) : 0;
+          const quotations = items
+            .filter((item) => item.QuotationReturn && item.Value)
+            .map((item) => ({
+              companyName: item.CompanyName || `Company ${item.CompanyID}`,
+              value: typeof item.Value === 'number' ? item.Value : Number(item.Value),
+              quotationReturn: item.QuotationReturn ? new Date(item.QuotationReturn).toISOString().split('T')[0] : null
+            }))
+            .sort((a, b) => a.value - b.value);
+
+          // Include all sent quotations (those with RFQDate)
+          const sentQuotations = items
+            .filter((item) => item.RFQDate)
+            .map((item) => ({
+              companyName: item.CompanyName || `Company ${item.CompanyID}`,
+              value: item.Value ? (typeof item.Value === 'number' ? item.Value : Number(item.Value)) : null,
+              rfqDate: item.RFQDate ? new Date(item.RFQDate).toISOString().split('T')[0] : null,
+              quotationReturn: item.QuotationReturn ? new Date(item.QuotationReturn).toISOString().split('T')[0] : null,
+              companyId: item.CompanyID,
+              rfqId: item.BOQRFQID,
+              notes: item.Notes || null,
+              subbieRef: item.SubbieRef || null
+            }))
+            .sort((a, b) => {
+              const dateA = a.rfqDate ? new Date(a.rfqDate).getTime() : 0
+              const dateB = b.rfqDate ? new Date(b.rfqDate).getTime() : 0
+              return dateB - dateA // Most recent first
+            });
+
+          return { packageName, totalSent: sent, totalReturned: returned, minValue, maxValue, returnedQuotes, quotations, sentQuotations };
+        } catch (error) {
+          console.error(`Error fetching RFQs for package ${packageName}:`, error);
+          return { packageName, totalSent: 0, totalReturned: 0, minValue: 0, maxValue: 0, returnedQuotes: [], quotations: [], sentQuotations: [] };
+        }
+      });
+
+      const results = await Promise.all(statsPromises);
+      return res.json({ success: true, packages: results });
+    } catch (error) {
+      console.error('Error fetching package dashboard stats:', error);
+      res.status(500).json({ error: 'Failed to fetch package dashboard stats', packages: [] });
+    }
+  }
+  ,
+  // GET /api/boq/:tenderId/:fileId/breakdown-report
+  breakdownReport: async (req, res) => {
+    try {
+      const { tenderId, fileId } = req.params;
+      const pool = await getConnectedPool();
+
+      // Load original file
+      const fileRes = await pool.request()
+        .input('FileID', parseInt(fileId))
+        .query(`SELECT FileID, BlobPath, DisplayName FROM tenderFile WHERE FileID = @FileID AND (IsDeleted = 0 OR IsDeleted IS NULL)`);
+      if (fileRes.recordset.length === 0) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+      const fileRow = fileRes.recordset[0];
+
+      const stream = await downloadFile(fileRow.BlobPath);
+      const buffer = await streamToBuffer(stream);
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+
+      const keywords = ['qty', 'quantity', 'price', 'value', 'total'];
+      const sheetValueRows = {};
+
+      workbook.worksheets.forEach((ws) => {
+        const name = ws.name;
+        const valueRows = new Set();
+        const candidateCols = new Set();
+        const headerRowsToCheck = [1, 2, 3].filter(r => r <= ws.rowCount);
+        headerRowsToCheck.forEach(rIdx => {
+          const r = ws.getRow(rIdx);
+          r.eachCell((cell, col) => {
+            const v = String(cell.value ?? '').toLowerCase();
+            if (v && keywords.some(k => v.includes(k))) candidateCols.add(col);
+          });
+        });
+        if (candidateCols.size === 0) {
+          sheetValueRows[name] = valueRows; return;
+        }
+        for (let r = 1; r <= ws.rowCount; r++) {
+          const row = ws.getRow(r);
+          let hasPositive = false;
+          candidateCols.forEach((col) => {
+            const cell = row.getCell(col);
+            let num = null;
+            if (typeof cell.value === 'number') {
+              num = cell.value;
+            } else if (cell.value && typeof cell.value === 'object' && cell.value.richText) {
+              const txt = cell.value.richText.map(t=>t.text).join('');
+              const parsed = Number(String(txt).replace(/[^0-9.\-]/g, ''));
+              if (!isNaN(parsed)) num = parsed;
+            } else if (cell.value != null) {
+              const parsed = Number(String(cell.value).replace(/[^0-9.\-]/g, ''));
+              if (!isNaN(parsed)) num = parsed;
+            }
+            if (num != null && isFinite(num) && num > 0) hasPositive = true;
+          });
+          if (hasPositive) valueRows.add(r);
+        }
+        sheetValueRows[name] = valueRows;
+      });
+
+      // Assigned rows from tenderBoQPackages.TableRange
+      const pkgRes = await pool.request()
+        .input('TenderID', parseInt(tenderId))
+        .input('FileID', parseInt(fileId))
+        .query(`SELECT PackageName, TableRange FROM tenderBoQPackages WHERE TenderID = @TenderID AND FileID = @FileID`);
+
+      const assignedRowsBySheet = {};
+      for (const rec of pkgRes.recordset) {
+        if (!rec.TableRange) continue;
+        let parsed; try { parsed = JSON.parse(rec.TableRange); } catch (_) { continue; }
+        const global = parsed.Global || {};
+        for (const [sheet, rangeStr] of Object.entries(parsed)) {
+          if (sheet === 'Global') continue;
+          if (!assignedRowsBySheet[sheet]) assignedRowsBySheet[sheet] = new Set();
+          expandRangeString(String(rangeStr)).forEach(r => assignedRowsBySheet[sheet].add(r));
+        }
+        for (const [sheet, rangeStr] of Object.entries(global)) {
+          if (!assignedRowsBySheet[sheet]) assignedRowsBySheet[sheet] = new Set();
+          expandRangeString(String(rangeStr)).forEach(r => assignedRowsBySheet[sheet].add(r));
+        }
+      }
+
+      let totalCandidates = 0, totalAssigned = 0;
+      const sheets = [];
+      for (const [sheet, valueSet] of Object.entries(sheetValueRows)) {
+        const assignedSet = assignedRowsBySheet[sheet] || new Set();
+        const unassigned = [];
+        valueSet.forEach((r) => {
+          totalCandidates++;
+          if (assignedSet.has(r)) totalAssigned++; else unassigned.push(r);
+        });
+        sheets.push({ sheet, candidates: valueSet.size, assigned: [...valueSet].filter(r=>assignedSet.has(r)).length, unassigned });
+      }
+      const percent = totalCandidates > 0 ? Math.round((totalAssigned / totalCandidates) * 100) : 0;
+
+      return res.json({ success: true, percent, totalCandidates, totalAssigned, sheets });
+    } catch (error) {
+      console.error('Error creating breakdown report:', error);
+      res.status(500).json({ error: 'Failed to create breakdown report' });
+    }
+  },
+  // DELETE /api/boq/:tenderId/:fileId
+  deleteBoQ: async (req, res) => {
+    try {
+      const { tenderId, fileId } = req.params;
+      const pool = await getConnectedPool();
+
+      // Soft-delete file and remove BOQ linkage and any saved package rows for this BOQ
+      // Order: delete RFQs -> delete package rows -> delete tenderBoQ row -> soft-delete tenderFile
+      try {
+        // Delete RFQs linked via packages for this file (optional best-effort)
+        await pool.request()
+          .input('TenderID', parseInt(tenderId))
+          .input('FileID', parseInt(fileId))
+          .query(`
+            DELETE r
+            FROM tenderPackageRFQ r
+            WHERE r.PackageID IN (
+              SELECT p.PackageID FROM tenderBoQPackages p WHERE p.TenderID = @TenderID AND p.FileID = @FileID
+            )
+          `);
+      } catch (_) {}
+
+      try {
+        // Delete saved package rows for this BOQ file
+        await pool.request()
+          .input('TenderID', parseInt(tenderId))
+          .input('FileID', parseInt(fileId))
+          .query(`DELETE FROM tenderBoQPackages WHERE TenderID = @TenderID AND FileID = @FileID`);
+      } catch (_) {}
+
+      // Fetch file to get blob path
+      let fileRow = null;
+      try {
+        const fr = await pool.request()
+          .input('FileID', parseInt(fileId))
+          .query(`SELECT FileID, BlobPath FROM tenderFile WHERE FileID = @FileID`);
+        fileRow = fr.recordset[0] || null;
+      } catch (_) {}
+
+      // Remove BOQ link
+      await pool.request()
+        .input('TenderID', parseInt(tenderId))
+        .input('FileID', parseInt(fileId))
+        .query(`DELETE FROM tenderBoQ WHERE TenderID = @TenderID AND FileID = @FileID`);
+
+      // Delete blob from storage if exists
+      try {
+        if (fileRow && fileRow.BlobPath) {
+          await require('../../config/azureBlobService').deleteFile(fileRow.BlobPath)
+        }
+      } catch (blobErr) {
+        console.error('Error deleting blob:', blobErr.message)
+      }
+
+      // Hard delete file record
+      await pool.request()
+        .input('FileID', parseInt(fileId))
+        .query(`DELETE FROM tenderFile WHERE FileID = @FileID`);
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('Error deleting BOQ:', error);
+      res.status(500).json({ error: 'Failed to delete BOQ' });
     }
   }
 };

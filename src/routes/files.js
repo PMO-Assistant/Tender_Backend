@@ -53,6 +53,9 @@ router.post('/upload', upload.single('file'), fileController.uploadFile);
 // Download file
 router.get('/:fileId/download', fileController.downloadFile);
 
+// Convert Word document to PDF
+router.get('/:fileId/pdf', fileController.convertWordToPdf);
+
 // Update file name
 router.put('/:fileId/name', fileController.updateFileName);
 
@@ -64,3 +67,10 @@ router.delete('/:fileId', fileController.deleteFile);
 
 // Get file preview URL
 router.get('/:fileId/preview', fileController.getFilePreviewUrl);
+
+module.exports = router;
+
+// Get file preview URL
+router.get('/:fileId/preview', fileController.getFilePreviewUrl);
+
+module.exports = router;
