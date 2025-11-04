@@ -130,8 +130,21 @@ const watchlistController = {
         Type,
         Source,
         Notes,
-        CompanyID
+        CompanyID,
+        CompanyName
       } = req.body;
+
+      // Resolve CompanyID from CompanyName if needed
+      let resolvedCompanyId = CompanyID;
+      if ((resolvedCompanyId === undefined || resolvedCompanyId === null || resolvedCompanyId === '') && CompanyName) {
+        const companyLookup = await pool.request()
+          .input('CompanyName', CompanyName)
+          .query(`SELECT CompanyID FROM tenderCompany WHERE CompanyName = @CompanyName`);
+        if (companyLookup.recordset.length === 0) {
+          return res.status(400).json({ error: 'Company not found', companyName: CompanyName });
+        }
+        resolvedCompanyId = companyLookup.recordset[0].CompanyID;
+      }
       
       // Validate required fields
       if (!ProjectName) {
@@ -146,7 +159,7 @@ const watchlistController = {
         .input('Type', Type || null)
         .input('Source', Source || null)
         .input('Notes', Notes || null)
-        .input('CompanyID', CompanyID || null)
+        .input('CompanyID', (resolvedCompanyId === '' || resolvedCompanyId === undefined) ? null : resolvedCompanyId)
         .input('AddBy', userId)
         .query(`
           INSERT INTO tenderWhatchlist 
@@ -203,8 +216,21 @@ const watchlistController = {
         Type,
         Source,
         Notes,
-        CompanyID
+        CompanyID,
+        CompanyName
       } = req.body;
+
+      // Resolve CompanyID from CompanyName if needed
+      let resolvedCompanyId = CompanyID;
+      if ((resolvedCompanyId === undefined || resolvedCompanyId === null || resolvedCompanyId === '') && CompanyName) {
+        const companyLookup = await pool.request()
+          .input('CompanyName', CompanyName)
+          .query(`SELECT CompanyID FROM tenderCompany WHERE CompanyName = @CompanyName`);
+        if (companyLookup.recordset.length === 0) {
+          return res.status(400).json({ error: 'Company not found', companyName: CompanyName });
+        }
+        resolvedCompanyId = companyLookup.recordset[0].CompanyID;
+      }
       
       // Check if item exists and user has permission
       const checkResult = await pool.request()
@@ -222,7 +248,8 @@ const watchlistController = {
       }
       
       // Update the item
-      await pool.request()
+      console.log('[watchlist.update] incoming body:', { id, ProjectName, OpenDate, Value, Status, Type, Source, Notes, CompanyID, CompanyName, resolvedCompanyId });
+      const updateResult = await pool.request()
         .input('WhatchlistID', id)
         .input('ProjectName', ProjectName)
         .input('OpenDate', OpenDate || null)
@@ -231,21 +258,21 @@ const watchlistController = {
         .input('Type', Type || null)
         .input('Source', Source || null)
         .input('Notes', Notes || null)
-        .input('CompanyID', CompanyID || null)
+        .input('CompanyID', (resolvedCompanyId === '' || resolvedCompanyId === undefined) ? null : resolvedCompanyId)
         .query(`
           UPDATE tenderWhatchlist 
           SET 
-            ProjectName = @ProjectName,
-            OpenDate = @OpenDate,
-            Value = @Value,
-            Status = @Status,
-            Type = @Type,
-            Source = @Source,
-            Notes = @Notes,
-            CompanyID = @CompanyID,
-            UpdatedAt = GETDATE()
+            ProjectName = COALESCE(@ProjectName, ProjectName),
+            OpenDate = COALESCE(@OpenDate, OpenDate),
+            Value = COALESCE(@Value, Value),
+            Status = COALESCE(@Status, Status),
+            Type = COALESCE(@Type, Type),
+            Source = COALESCE(@Source, Source),
+            Notes = COALESCE(@Notes, Notes),
+            CompanyID = COALESCE(@CompanyID, CompanyID)
           WHERE WhatchlistID = @WhatchlistID
         `);
+      console.log('[watchlist.update] rowsAffected:', updateResult.rowsAffected);
       
       // Fetch the updated item
       const updatedItem = await pool.request()
@@ -523,8 +550,21 @@ module.exports = watchlistController;
         Type,
         Source,
         Notes,
-        CompanyID
+        CompanyID,
+        CompanyName
       } = req.body;
+      
+      // Resolve CompanyID from CompanyName if needed
+      let resolvedCompanyId = CompanyID;
+      if ((resolvedCompanyId === undefined || resolvedCompanyId === null || resolvedCompanyId === '') && CompanyName) {
+        const companyLookup = await pool.request()
+          .input('CompanyName', CompanyName)
+          .query(`SELECT CompanyID FROM tenderCompany WHERE CompanyName = @CompanyName`);
+        if (companyLookup.recordset.length === 0) {
+          return res.status(400).json({ error: 'Company not found', companyName: CompanyName });
+        }
+        resolvedCompanyId = companyLookup.recordset[0].CompanyID;
+      }
       
       // Check if item exists and user has permission
       const checkResult = await pool.request()
@@ -551,19 +591,18 @@ module.exports = watchlistController;
         .input('Type', Type || null)
         .input('Source', Source || null)
         .input('Notes', Notes || null)
-        .input('CompanyID', CompanyID || null)
+        .input('CompanyID', (resolvedCompanyId === '' || resolvedCompanyId === undefined) ? null : resolvedCompanyId)
         .query(`
           UPDATE tenderWhatchlist 
           SET 
-            ProjectName = @ProjectName,
-            OpenDate = @OpenDate,
-            Value = @Value,
-            Status = @Status,
-            Type = @Type,
-            Source = @Source,
-            Notes = @Notes,
-            CompanyID = @CompanyID,
-            UpdatedAt = GETDATE()
+            ProjectName = COALESCE(@ProjectName, ProjectName),
+            OpenDate = COALESCE(@OpenDate, OpenDate),
+            Value = COALESCE(@Value, Value),
+            Status = COALESCE(@Status, Status),
+            Type = COALESCE(@Type, Type),
+            Source = COALESCE(@Source, Source),
+            Notes = COALESCE(@Notes, Notes),
+            CompanyID = COALESCE(@CompanyID, CompanyID)
           WHERE WhatchlistID = @WhatchlistID
         `);
       

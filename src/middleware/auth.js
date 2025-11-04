@@ -28,11 +28,24 @@ const authenticateToken = async (req, res, next) => {
     // Explicitly specify the algorithm to avoid "invalid algorithm" error
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
     
-    // Verify user still exists in database and is active
+    // Verify user still exists in database and is active (with one reconnect retry)
     const pool = await getConnectedPool();
-    const result = await pool.request()
-      .input('email', decoded.email)
-      .query('SELECT UserID, Name, Email, Status FROM tenderEmployee WHERE Email = @email');
+    let result;
+    try {
+      result = await pool.request()
+        .input('email', decoded.email)
+        .query('SELECT UserID, Name, Email, Status FROM tenderEmployee WHERE Email = @email');
+    } catch (dbErr) {
+      if (dbErr && dbErr.code === 'ECONNCLOSED') {
+        console.warn('[AUTH] DB connection was closed. Retrying once...');
+        const retryPool = await getConnectedPool();
+        result = await retryPool.request()
+          .input('email', decoded.email)
+          .query('SELECT UserID, Name, Email, Status FROM tenderEmployee WHERE Email = @email');
+      } else {
+        throw dbErr;
+      }
+    }
     
     if (result.recordset.length === 0) {
       return res.status(401).json({ 
