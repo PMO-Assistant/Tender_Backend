@@ -30,7 +30,7 @@ const getLatestPlanningNews = async (req, res) => {
     if (downloadBlockMatch) {
       week = downloadBlockMatch[1];
       href = downloadBlockMatch[2];
-      size = downloadBlockMatch[3]?.trim();
+      size = downloadBlockMatch[3] ? downloadBlockMatch[3].trim() : undefined;
       console.log(`✅ Found Area 1 Week ${week} via Strategy 1`);
     }
 
@@ -39,7 +39,7 @@ const getLatestPlanningNews = async (req, res) => {
       const a1LinkMatch = html.match(/<a[^>]*href="([^"]*\/(?:a1-wpl|area-1)[^"]*\.(?:docx|pdf))"[^>]*class=["'][^"']*button[^"']*["'][^>]*>[\s\S]*?<span[^>]*class=["'][^"']*button__content[^"']*["'][^>]*>\s*Download[^(]*\(([^)]+)\)/i);
       if (a1LinkMatch) {
         href = a1LinkMatch[1];
-        size = a1LinkMatch[2]?.trim();
+        size = a1LinkMatch[2] ? a1LinkMatch[2].trim() : undefined;
         // Try to extract week number from filename like "a1-wpl-43-25.docx"
         const weekMatch = href.match(/a1-wpl-(\d+)/i);
         if (weekMatch) {
@@ -54,7 +54,7 @@ const getLatestPlanningNews = async (req, res) => {
       const area1ButtonMatch = html.match(/Area\s*1[\s\S]{0,500}?<a[^>]*href="([^"]+\.(?:docx|pdf))"[^>]*class=["'][^"']*button[^"']*["'][^>]*>[\s\S]*?<span[^>]*class=["'][^"']*button__content[^"']*["'][^>]*>\s*Download[^(]*\(([^)]+)\)/i);
       if (area1ButtonMatch) {
         href = area1ButtonMatch[1];
-        size = area1ButtonMatch[2]?.trim();
+        size = area1ButtonMatch[2] ? area1ButtonMatch[2].trim() : undefined;
         console.log(`✅ Found Area 1 link via Strategy 3`);
       }
     }
@@ -64,7 +64,7 @@ const getLatestPlanningNews = async (req, res) => {
       const anyButtonMatch = html.match(/<a[^>]*href="([^"]+\.(?:docx|pdf))"[^>]*class=["'][^"']*button[^"']*["'][^>]*>[\s\S]*?<span[^>]*class=["'][^"']*button__content[^"']*["'][^>]*>\s*Download[^(]*\(([^)]+)\)/i);
       if (anyButtonMatch) {
         href = anyButtonMatch[1];
-        size = anyButtonMatch[2]?.trim();
+        size = anyButtonMatch[2] ? anyButtonMatch[2].trim() : undefined;
         console.log(`⚠️ Found link via Strategy 4 (fallback)`);
       }
     }
@@ -107,3 +107,4 @@ const getLatestPlanningNews = async (req, res) => {
 module.exports = {
   getLatestPlanningNews
 };
+

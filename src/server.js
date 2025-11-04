@@ -124,6 +124,9 @@ try {
   console.log('✅ Contact routes loaded');
 } catch (error) {
   console.error('❌ Error loading contact routes:', error.message);
+  if (error && error.stack) {
+    console.error('❌ Error stack:', error.stack);
+  }
 }
 
 // (Hunter proxy removed)

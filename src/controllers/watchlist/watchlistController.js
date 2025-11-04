@@ -79,7 +79,7 @@ const watchlistController = {
     try {
       const pool = await getConnectedPool();
       const { id } = req.params;
-      const userId = req.user?.UserID;
+      const userId = req.user && req.user.UserID;
       
       const result = await pool.request()
         .input('WhatchlistID', id)
@@ -121,7 +121,7 @@ const watchlistController = {
   createWatchlistItem: async (req, res) => {
     try {
       const pool = await getConnectedPool();
-      const userId = req.user?.UserID;
+      const userId = req.user && req.user.UserID;
       const {
         ProjectName,
         OpenDate,
@@ -156,7 +156,7 @@ const watchlistController = {
           SELECT SCOPE_IDENTITY() AS WhatchlistID
         `);
       
-      const newId = result.recordset[0]?.WhatchlistID;
+      const newId = result.recordset[0] ? result.recordset[0].WhatchlistID : undefined;
       
       // Fetch the newly created item
       const newItem = await pool.request()
@@ -194,7 +194,7 @@ const watchlistController = {
     try {
       const pool = await getConnectedPool();
       const { id } = req.params;
-      const userId = req.user?.UserID;
+      const userId = req.user && req.user.UserID;
       const {
         ProjectName,
         OpenDate,
@@ -283,7 +283,7 @@ const watchlistController = {
     try {
       const pool = await getConnectedPool();
       const { id } = req.params;
-      const userId = req.user?.UserID;
+      const userId = req.user && req.user.UserID;
       
       // Check if item exists and user has permission
       const checkResult = await pool.request()
@@ -399,7 +399,7 @@ module.exports = watchlistController;
     try {
       const pool = await getConnectedPool();
       const { id } = req.params;
-      const userId = req.user?.UserID;
+      const userId = req.user && req.user.UserID;
       
       const result = await pool.request()
         .input('WhatchlistID', id)
@@ -476,7 +476,7 @@ module.exports = watchlistController;
           SELECT SCOPE_IDENTITY() AS WhatchlistID
         `);
       
-      const newId = result.recordset[0]?.WhatchlistID;
+      const newId = result.recordset[0] ? result.recordset[0].WhatchlistID : undefined;
       
       // Fetch the newly created item
       const newItem = await pool.request()
@@ -514,7 +514,7 @@ module.exports = watchlistController;
     try {
       const pool = await getConnectedPool();
       const { id } = req.params;
-      const userId = req.user?.UserID;
+      const userId = req.user && req.user.UserID;
       const {
         ProjectName,
         OpenDate,
@@ -603,7 +603,7 @@ module.exports = watchlistController;
     try {
       const pool = await getConnectedPool();
       const { id } = req.params;
-      const userId = req.user?.UserID;
+      const userId = req.user && req.user.UserID;
       
       // Check if item exists and user has permission
       const checkResult = await pool.request()

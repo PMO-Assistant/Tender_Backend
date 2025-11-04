@@ -542,7 +542,7 @@ const fileController = {
                         await deleteBlobFile(f.BlobPath);
                     }
                 } catch (blobErr) {
-                    console.warn('Warning: Failed to delete file from blob storage during folder delete:', blobErr?.message);
+                    console.warn('Warning: Failed to delete file from blob storage during folder delete:', (blobErr && blobErr.message) || blobErr);
                 }
 
                 await pool.request()
@@ -866,8 +866,8 @@ ORDER BY f.CreatedAt DESC;
             
             console.log('Metadata extraction result:', {
                 hasMetadata: !!metadata,
-                hasText: !!metadata?.extractedText,
-                textLength: metadata?.textLength || 0
+                hasText: !!(metadata && metadata.extractedText),
+                textLength: (metadata && metadata.textLength) || 0
             });
 
             // Test database insert with minimal data
@@ -882,7 +882,7 @@ ORDER BY f.CreatedAt DESC;
                 .input('DocID', 1) // Use doc ID 1 for testing
                 .input('ConnectionTable', 'test')
                 .input('Metadata', JSON.stringify(metadata))
-                .input('ExtractedText', metadata?.extractedText || null)
+                .input('ExtractedText', (metadata && metadata.extractedText) || null)
                 .query(`
                     INSERT INTO tenderFile (AddBy, FolderID, BlobPath, DisplayName, UploadedOn, Size, ContentType, Status, DocID, ConnectionTable, Metadata, ExtractedText)
                     VALUES (@AddBy, @FolderID, @BlobPath, @DisplayName, GETDATE(), @Size, @ContentType, @Status, @DocID, @ConnectionTable, @Metadata, @ExtractedText);
@@ -899,8 +899,8 @@ ORDER BY f.CreatedAt DESC;
                 fileName: originalname,
                 size: size,
                 metadata: metadata,
-                hasText: !!metadata?.extractedText,
-                textLength: metadata?.textLength || 0
+                hasText: !!(metadata && metadata.extractedText),
+                textLength: (metadata && metadata.textLength) || 0
             });
 
         } catch (error) {
@@ -1027,7 +1027,7 @@ ORDER BY f.CreatedAt DESC;
                             FROM tenderFolder tf
                             WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.ParentFolderID = 2
                         `);
-                    const tenderRootId = tenderRoot.recordset?.[0]?.FolderID || null;
+                    const tenderRootId = tenderRoot.recordset && tenderRoot.recordset[0] ? tenderRoot.recordset[0].FolderID : null;
 
                     if (tenderRootId) {
                         // 2) Prefer RFI subfolder when RFI context
@@ -1051,7 +1051,7 @@ ORDER BY f.CreatedAt DESC;
                         }
                     }
                 } catch (resolveErr) {
-                    console.warn('Warning: failed to resolve Tender/RFI folder, will require explicit FolderID', resolveErr?.message);
+                    console.warn('Warning: failed to resolve Tender/RFI folder, will require explicit FolderID', (resolveErr && resolveErr.message) || resolveErr);
                 }
             }
 
@@ -1067,7 +1067,7 @@ ORDER BY f.CreatedAt DESC;
                             JOIN tenderBoQPackages p ON r.PackageID = p.PackageID
                             WHERE r.BOQRFQID = @BOQRFQID
                         `);
-                    const rfqTenderId = rfqLookup.recordset[0]?.TenderID || null;
+                    const rfqTenderId = rfqLookup.recordset && rfqLookup.recordset[0] ? rfqLookup.recordset[0].TenderID : null;
                     if (rfqTenderId) {
                         const boqFolder = await pool.request()
                             .input('TenderID', rfqTenderId)
@@ -1087,8 +1087,8 @@ ORDER BY f.CreatedAt DESC;
                                     FROM tenderFolder tf
                                     WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.ParentFolderID = 2
                                 `);
-                            const tenderRootId = tenderRoot.recordset?.[0]?.FolderID || null;
-                            const tenderRootPath = tenderRoot.recordset?.[0]?.FolderPath || null;
+                            const tenderRootId = tenderRoot.recordset && tenderRoot.recordset[0] ? tenderRoot.recordset[0].FolderID : null;
+                            const tenderRootPath = tenderRoot.recordset && tenderRoot.recordset[0] ? tenderRoot.recordset[0].FolderPath : null;
                             if (tenderRootId) {
                                 // Check for existing BOQ subfolder under tender root
                                 const existingBoq = await pool.request()
@@ -1120,7 +1120,7 @@ ORDER BY f.CreatedAt DESC;
                     }
                 }
             } catch (rfqFolderErr) {
-                console.warn('Warning: failed to resolve BOQ folder for RFQ upload:', rfqFolderErr?.message);
+                console.warn('Warning: failed to resolve BOQ folder for RFQ upload:', (rfqFolderErr && rfqFolderErr.message) || rfqFolderErr);
             }
 
             // Validate required fields after fallback and RFQ resolution
@@ -1138,7 +1138,7 @@ ORDER BY f.CreatedAt DESC;
                                 JOIN tenderBoQPackages p ON r.PackageID = p.PackageID
                                 WHERE r.BOQRFQID = @BOQRFQID
                             `);
-                        const rfqTenderId2 = rfqLookup2.recordset[0]?.TenderID || null;
+                        const rfqTenderId2 = rfqLookup2.recordset && rfqLookup2.recordset[0] ? rfqLookup2.recordset[0].TenderID : null;
                         if (rfqTenderId2) {
                             const boqFolder2 = await pool.request()
                                 .input('TenderID', rfqTenderId2)
@@ -1179,8 +1179,8 @@ ORDER BY f.CreatedAt DESC;
             
             console.log('Metadata extraction completed:', {
                 hasMetadata: !!metadata,
-                hasText: !!metadata?.extractedText,
-                textLength: metadata?.textLength || 0
+                hasText: !!(metadata && metadata.extractedText),
+                textLength: (metadata && metadata.textLength) || 0
             });
 
             console.log('Saving file to database...');
@@ -1197,7 +1197,7 @@ ORDER BY f.CreatedAt DESC;
                 .input('DocID', docId ? parseInt(docId) : null) // Handle null docId for general uploads
                 .input('ConnectionTable', connectionTable || null) // Handle null connectionTable for general uploads
                 .input('Metadata', JSON.stringify(metadata))
-                .input('ExtractedText', metadata?.extractedText || null)
+                .input('ExtractedText', (metadata && metadata.extractedText) || null)
                 .query(`
                     INSERT INTO tenderFile (AddBy, FolderID, BlobPath, DisplayName, UploadedOn, Size, ContentType, Status, DocID, ConnectionTable, Metadata, ExtractedText)
                     VALUES (@AddBy, @FolderID, @BlobPath, @DisplayName, GETDATE(), @Size, @ContentType, @Status, @DocID, @ConnectionTable, @Metadata, @ExtractedText);
@@ -1220,8 +1220,8 @@ ORDER BY f.CreatedAt DESC;
                             WHERE FolderID = @FolderID
                         `);
                     
-                    const folderName = folderCheck.recordset[0]?.FolderName || '';
-                    const parentFolderId = folderCheck.recordset[0]?.ParentFolderID;
+                    const folderName = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].FolderName : '';
+                    const parentFolderId = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].ParentFolderID : undefined;
                     
                     // Check if it's a BOQ folder (direct or nested)
                     let isBoqFolder = folderName === 'BOQ';
@@ -1230,7 +1230,7 @@ ORDER BY f.CreatedAt DESC;
                         const parentCheck = await pool.request()
                             .input('ParentFolderID', parentFolderId)
                             .query(`SELECT FolderName FROM tenderFolder WHERE FolderID = @ParentFolderID`);
-                        isBoqFolder = parentCheck.recordset[0]?.FolderName === 'BOQ';
+                        isBoqFolder = parentCheck.recordset && parentCheck.recordset[0] && parentCheck.recordset[0].FolderName === 'BOQ';
                     }
                     
                     if (isBoqFolder) {
@@ -1242,7 +1242,7 @@ ORDER BY f.CreatedAt DESC;
                             .input('TenderID', tenderIdInt)
                             .input('FileID', fileIdInt)
                         .input('UploadedAt', new Date())
-                        .input('Description', metadata?.title || originalname)
+                        .input('Description', (metadata && metadata.title) || originalname)
                         .query(`
                             INSERT INTO tenderBoQ (TenderID, FileID, UploadedAt, Description)
                             VALUES (@TenderID, @FileID, @UploadedAt, @Description)

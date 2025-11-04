@@ -387,24 +387,3 @@ const contactController = {
 };
 
 module.exports = contactController;
-
-                .input('ContactID', req.params.id)
-                .query(`
-                    UPDATE tenderContact
-                    SET IsDeleted = 1,
-                        DeletedAt = GETDATE()
-                    WHERE ContactID = @ContactID AND IsDeleted = 0
-                `);
-
-            if (result.rowsAffected[0] === 0) {
-                return res.status(404).json({ message: 'Contact not found or already deleted' });
-            }
-
-            res.json({ message: 'Contact deleted successfully' });
-        } catch (err) {
-            res.status(500).json({ message: err.message });
-        }
-    }
-};
-
-module.exports = contactController;
