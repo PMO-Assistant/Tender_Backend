@@ -95,7 +95,8 @@ const handleAuthRedirect = (req, res, next) => {
 // Middleware to check if user needs to be redirected to login
 const checkAuthStatus = async (req, res, next) => {
   try {
-    const token = req.headers['authorization']?.split(' ')[1];
+    const authHeader = req.headers && req.headers['authorization'];
+    const token = authHeader ? authHeader.split(' ')[1] : undefined;
     
     if (!token) {
       return res.status(401).json({
