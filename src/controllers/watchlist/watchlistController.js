@@ -319,7 +319,8 @@ const watchlistController = {
 module.exports = watchlistController;
 
 
-const watchlistController = {
+/* DUPLICATE DEFINITION REMOVED BELOW */
+/* const watchlistController = {
   // Test watchlist table connection
   testWatchlistTable: async (req, res) => {
     try {
@@ -635,5 +636,5 @@ const watchlistController = {
   }
 };
 
-module.exports = watchlistController;
+module.exports = watchlistController; */
 
