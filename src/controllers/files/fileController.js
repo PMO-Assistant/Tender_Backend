@@ -3,6 +3,7 @@ const { uploadFile, downloadFile, deleteFile } = require('../../config/azureBlob
 const multer = require('multer');
 const path = require('path');
 const openAIService = require('../../config/openAIService');
+const archiver = require('archiver');
 
 // Configure multer for memory storage
 const upload = multer({
@@ -347,7 +348,8 @@ const fileController = {
                 tenderFolderId = insertResult.recordset[0].FolderID;
             }
 
-            const subNames = ['General', 'RFI', 'BOQ', 'SAQ'];
+            // Create all subfolders: General, RFI, BOQ, SAQ, and Drawings
+            const subNames = ['General', 'RFI', 'BOQ', 'SAQ', 'Drawings'];
             const subfolderIds = {};
             for (const name of subNames) {
                 const existsSub = await pool.request()
@@ -385,7 +387,12 @@ const fileController = {
             });
         } catch (error) {
             console.error('Error ensuring tender folder:', error);
-            res.status(500).json({ message: 'Failed to ensure tender folder' });
+            console.error('Error stack:', error.stack);
+            res.status(500).json({ 
+                message: 'Failed to ensure tender folder',
+                error: error.message,
+                details: error.toString()
+            });
         }
     },
 
@@ -597,6 +604,7 @@ const fileController = {
     getFilesByDocument: async (req, res) => {
         try {
             const { docId, connectionTable } = req.params;
+            const includeDeleted = req.query.includeDeleted === 'true' || req.query.includeDeleted === '1';
             
             // Validate parameters
             if (!docId || docId === 'undefined' || !connectionTable || connectionTable === 'undefined') {
@@ -606,11 +614,9 @@ const fileController = {
             const pool = await getConnectedPool();
             const userId = req.user.UserID;
 
-            const result = await pool.request()
-                .input('DocID', docId)
-                .input('ConnectionTable', connectionTable)
-                .input('UserID', userId)
-                .query(`
+            // Build query - for RFQ files, include deleted files since they might be needed for comparison
+            const isRFQ = connectionTable && connectionTable.toLowerCase().includes('tenderpackagerfq');
+            const query = isRFQ || includeDeleted ? `
                     SELECT 
     f.FileID as id,
     f.DisplayName as name,
@@ -620,9 +626,35 @@ const fileController = {
     f.CreatedAt as createdAt,
     f.UpdatedAt as updatedAt,
     f.FolderID as folderId,
-    f.DocID as docId,                 -- add
-    f.ConnectionTable as connectionTable,  -- add
-    f.Metadata as metadata,           -- add
+    f.DocID as docId,
+    f.ConnectionTable as connectionTable,
+    f.Metadata as metadata,
+    f.IsDeleted as isDeleted,
+    fl.FolderName as folderName,
+    fl.FolderPath as folderPath,
+    u.Name as uploadedBy,
+    CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred
+FROM tenderFile f
+LEFT JOIN tenderFolder fl ON f.FolderID = fl.FolderID
+LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+WHERE f.DocID = @DocID 
+  AND f.ConnectionTable = @ConnectionTable
+ORDER BY f.CreatedAt DESC;
+                ` : `
+                    SELECT 
+    f.FileID as id,
+    f.DisplayName as name,
+    f.ContentType as contentType,
+    f.Size as size,
+    f.UploadedOn as uploadedOn,
+    f.CreatedAt as createdAt,
+    f.UpdatedAt as updatedAt,
+    f.FolderID as folderId,
+    f.DocID as docId,
+    f.ConnectionTable as connectionTable,
+    f.Metadata as metadata,
+    f.IsDeleted as isDeleted,
     fl.FolderName as folderName,
     fl.FolderPath as folderPath,
     u.Name as uploadedBy,
@@ -635,7 +667,13 @@ WHERE f.DocID = @DocID
   AND f.ConnectionTable = @ConnectionTable
   AND f.IsDeleted = 0
 ORDER BY f.CreatedAt DESC;
-                `);
+                `;
+
+            const result = await pool.request()
+                .input('DocID', docId)
+                .input('ConnectionTable', connectionTable)
+                .input('UserID', userId)
+                .query(query);
 
             // Map the results to frontend format
             const files = result.recordset.map(file => ({
@@ -1259,7 +1297,7 @@ ORDER BY f.CreatedAt DESC;
                 console.error('[uploadFile] Error stack:', boqErr.stack);
             }
 
-            // Upload to Azure Blob Storage
+            // Upload to Azure Blob Storage FIRST (before extraction, so file exists when we try to download it)
             try {
                 const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
                 
@@ -1289,8 +1327,187 @@ ORDER BY f.CreatedAt DESC;
                 console.log('File uploaded to Azure Blob Storage successfully');
             } catch (azureError) {
                 console.error('Azure Blob Storage upload failed:', azureError);
-                // Don't fail the entire request if Azure upload fails
-                // The file record is already saved in the database
+                // Delete the database record if blob upload fails
+                await pool.request()
+                    .input('FileID', parseInt(fileId))
+                    .query(`DELETE FROM tenderFile WHERE FileID = @FileID`);
+                return res.status(500).json({ error: 'Failed to upload file to storage', details: azureError.message });
+            }
+
+            // If uploaded into Tender > Drawings folder, automatically extract and create tenderDrawing record
+            try {
+                if (connectionTable === 'tenderTender' && docId && folderId) {
+                    // Check if the file was uploaded to a Drawings folder
+                    const folderCheck = await pool.request()
+                        .input('FolderID', parseInt(folderId))
+                        .query(`
+                            SELECT FolderName, ParentFolderID 
+                            FROM tenderFolder 
+                            WHERE FolderID = @FolderID
+                        `);
+                    
+                    const folderName = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].FolderName : '';
+                    const parentFolderId = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].ParentFolderID : undefined;
+                    
+                    // Check if it's a Drawings folder (direct or nested)
+                    let isDrawingsFolder = folderName === 'Drawings';
+                    if (!isDrawingsFolder && parentFolderId) {
+                        // Check parent folder
+                        const parentCheck = await pool.request()
+                            .input('ParentFolderID', parentFolderId)
+                            .query(`SELECT FolderName FROM tenderFolder WHERE FolderID = @ParentFolderID`);
+                        isDrawingsFolder = parentCheck.recordset && parentCheck.recordset[0] && parentCheck.recordset[0].FolderName === 'Drawings';
+                    }
+                    
+                    if (isDrawingsFolder) {
+                        const tenderIdInt = parseInt(docId);
+                        const fileIdInt = parseInt(fileId);
+                        console.log(`[uploadFile] 🎨 File uploaded to Drawings folder - Auto-extracting drawing info...`);
+                        console.log(`[uploadFile] TenderID=${tenderIdInt}, FileID=${fileIdInt}, FolderName=${folderName}`);
+                        
+                        // Import drawing controller
+                        const drawingController = require('../drawing/drawingController');
+                        
+                        // Create a mock request object for the extraction function
+                        const mockReq = {
+                            params: { fileId: fileIdInt },
+                            user: { UserID: userId },
+                            body: {}
+                        };
+                        
+                        // Create a mock response object to capture the result
+                        let extractionResult = null;
+                        let extractionError = null;
+                        const mockRes = {
+                            status: (code) => ({
+                                json: (data) => {
+                                    if (code >= 200 && code < 300) {
+                                        extractionResult = data;
+                                    } else {
+                                        extractionError = data;
+                                    }
+                                }
+                            }),
+                            json: (data) => {
+                                extractionResult = data;
+                            }
+                        };
+                        
+                        try {
+                            // Call the extraction function directly
+                            await drawingController.extractDrawingInfo(mockReq, mockRes);
+                            
+                            // Verify that extraction succeeded and a record was saved
+                            if (!extractionResult || !extractionResult.saved || !extractionResult.drawingId) {
+                                throw new Error(extractionError?.error || 'Drawing extraction failed - no record saved to tenderDrawing');
+                            }
+                            
+                            // Verify the record actually exists in tenderDrawing using the DrawingID that was returned
+                            const verifyResult = await pool.request()
+                                .input('DrawingID', extractionResult.drawingId)
+                                .query(`
+                                    SELECT DrawingID, DrawingNumber, Title 
+                                    FROM tenderDrawing 
+                                    WHERE DrawingID = @DrawingID
+                                `);
+                            
+                            if (verifyResult.recordset.length === 0) {
+                                // Fallback: try to find by TenderID + DrawingNumber if DrawingID lookup fails
+                                const drawingNumber = extractionResult.drawingNumber || 'UNKNOWN';
+                                const altVerify = await pool.request()
+                                    .input('TenderID', tenderIdInt)
+                                    .input('DrawingNumber', drawingNumber)
+                                    .query(`
+                                        SELECT DrawingID 
+                                        FROM tenderDrawing 
+                                        WHERE TenderID = @TenderID AND DrawingNumber = @DrawingNumber
+                                    `);
+                                
+                                if (altVerify.recordset.length === 0) {
+                                    throw new Error(`Drawing extraction completed but no record found in tenderDrawing table (DrawingID: ${extractionResult.drawingId}, DrawingNumber: ${drawingNumber})`);
+                                }
+                                
+                                console.log(`[uploadFile] ✅ Verified drawing exists using TenderID + DrawingNumber: DrawingID=${altVerify.recordset[0].DrawingID}`);
+                            } else {
+                                console.log(`[uploadFile] ✅ Verified drawing exists: DrawingID=${verifyResult.recordset[0].DrawingID}, DrawingNumber=${verifyResult.recordset[0].DrawingNumber}`);
+                            }
+                            
+                            console.log(`[uploadFile] ✅ Successfully extracted and saved drawing to tenderDrawing table for FileID=${fileIdInt}, DrawingID=${extractionResult.drawingId}`);
+                        } catch (extractErr) {
+                            console.error(`[uploadFile] ❌ Failed to extract drawing info for FileID=${fileIdInt}:`, extractErr.message);
+                            
+                            // DELETE THE FILE if extraction fails
+                            console.log(`[uploadFile] 🗑️ Deleting file record and blob because extraction failed...`);
+                            
+                            // Delete from database
+                            await pool.request()
+                                .input('FileID', fileIdInt)
+                                .query(`
+                                    DELETE FROM tenderFile 
+                                    WHERE FileID = @FileID
+                                `);
+                            
+                            // Delete from blob storage
+                            try {
+                                const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
+                                await deleteBlobFile(blobPath);
+                                console.log(`[uploadFile] ✅ Deleted file from blob storage: ${blobPath}`);
+                            } catch (blobErr) {
+                                console.error(`[uploadFile] ⚠️ Failed to delete blob:`, blobErr.message);
+                            }
+                            
+                            // Return error response
+                            return res.status(400).json({ 
+                                error: 'Failed to extract drawing information',
+                                message: 'File was not saved because drawing extraction failed. Please ensure the file is a valid PDF or image drawing.',
+                                details: extractErr.message
+                            });
+                        }
+                    } else {
+                        console.log(`[uploadFile] Skipping drawing extraction: File not in Drawings folder (FolderName=${folderName}, FolderID=${folderId})`);
+                    }
+                } else {
+                    console.log(`[uploadFile] Skipping drawing extraction: connectionTable=${connectionTable}, docId=${docId}, folderId=${folderId}`);
+                }
+            } catch (drawingErr) {
+                console.error('[uploadFile] ❌ Error during drawing extraction:', drawingErr.message);
+                console.error('[uploadFile] Error stack:', drawingErr.stack);
+                
+                // If we're in a Drawings folder and extraction failed, delete the file
+                try {
+                    const folderCheck = await pool.request()
+                        .input('FolderID', parseInt(folderId))
+                        .query(`SELECT FolderName FROM tenderFolder WHERE FolderID = @FolderID`);
+                    
+                    const folderName = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].FolderName : '';
+                    
+                    if (folderName === 'Drawings' || (folderCheck.recordset && folderCheck.recordset[0]?.ParentFolderID)) {
+                        console.log(`[uploadFile] 🗑️ Deleting file because extraction error in Drawings folder...`);
+                        
+                        // Delete from database
+                        await pool.request()
+                            .input('FileID', parseInt(fileId))
+                            .query(`DELETE FROM tenderFile WHERE FileID = @FileID`);
+                        
+                        // Delete from blob storage
+                        try {
+                            const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
+                            await deleteBlobFile(blobPath);
+                        } catch (blobErr) {
+                            console.error(`[uploadFile] ⚠️ Failed to delete blob:`, blobErr.message);
+                        }
+                        
+                        return res.status(400).json({ 
+                            error: 'Failed to extract drawing information',
+                            message: 'File was not saved because drawing extraction failed.',
+                            details: drawingErr.message
+                        });
+                    }
+                } catch (deleteErr) {
+                    console.error('[uploadFile] ❌ Failed to delete file after extraction error:', deleteErr);
+                }
+                
+                // Don't throw - let the upload continue if it's not a Drawings folder
             }
 
             console.log('File upload completed successfully');
@@ -1393,9 +1610,17 @@ ORDER BY f.CreatedAt DESC;
 
             console.log(`🔍 Download request for file ID: ${fileId} by user: ${userId}`);
 
+            // Validate fileId
+            if (!fileId || fileId === 'undefined' || isNaN(parseInt(fileId))) {
+                console.error(`❌ Invalid file ID: ${fileId}`);
+                return res.status(400).json({ error: 'Invalid file ID' });
+            }
+
+            const fileIdInt = parseInt(fileId);
+
             // Get file info
             const result = await pool.request()
-                .input('FileID', fileId)
+                .input('FileID', fileIdInt)
                 .input('UserID', userId)
                 .query(`
                     SELECT DisplayName, BlobPath, ContentType
@@ -1562,10 +1787,17 @@ ORDER BY f.CreatedAt DESC;
 
             console.log('generateFileSASUrl called with:', { fileId, userId });
 
+            // Validate fileId
+            if (!fileId || fileId === 'undefined' || isNaN(parseInt(fileId))) {
+                return res.status(400).json({ error: 'Invalid file ID' });
+            }
+
+            const fileIdInt = parseInt(fileId);
+
             // Get the file details from database
             const pool = await getConnectedPool();
             const fileResult = await pool.request()
-                .input('FileID', fileId)
+                .input('FileID', fileIdInt)
                 .input('UserID', userId)
                 .query(`
                     SELECT f.BlobPath, f.DisplayName, f.ContentType, f.AddBy, ta.Admin
@@ -1596,7 +1828,7 @@ ORDER BY f.CreatedAt DESC;
                 return res.status(403).json({ error: 'Access denied' });
             }
 
-            // Check if it's an Excel or Word file
+            // Check if it's an Excel, Word, or PDF file
             const isExcelFile = file.ContentType.includes('spreadsheet') || 
                                file.ContentType.includes('excel') ||
                                file.DisplayName.toLowerCase().endsWith('.xlsx') ||
@@ -1610,18 +1842,23 @@ ORDER BY f.CreatedAt DESC;
                                file.DisplayName.toLowerCase().endsWith('.docx') ||
                                file.DisplayName.toLowerCase().endsWith('.doc');
 
+            const isPdfFile = file.ContentType.includes('pdf') ||
+                             file.DisplayName.toLowerCase().endsWith('.pdf');
+
             console.log('🔍 File type check:', {
                 DisplayName: file.DisplayName,
                 ContentType: file.ContentType,
                 isExcelFile,
                 isWordFile,
+                isPdfFile,
                 endsWithDocx: file.DisplayName.toLowerCase().endsWith('.docx'),
-                endsWithDoc: file.DisplayName.toLowerCase().endsWith('.doc')
+                endsWithDoc: file.DisplayName.toLowerCase().endsWith('.doc'),
+                endsWithPdf: file.DisplayName.toLowerCase().endsWith('.pdf')
             });
 
-            if (!isExcelFile && !isWordFile) {
-                console.log('❌ File is not Excel or Word:', file.DisplayName, file.ContentType);
-                return res.status(400).json({ error: 'File is not an Excel or Word file' });
+            if (!isExcelFile && !isWordFile && !isPdfFile) {
+                console.log('❌ File is not Excel, Word, or PDF:', file.DisplayName, file.ContentType);
+                return res.status(400).json({ error: 'File is not an Excel, Word, or PDF file' });
             }
 
             // Generate SAS URL for the blob
@@ -1966,6 +2203,98 @@ ORDER BY f.CreatedAt DESC;
         } catch (error) {
             console.error('Error searching files with filter:', error);
             res.status(500).json({ message: 'Failed to search files with filter' });
+        }
+    },
+
+    // Download multiple files as ZIP
+    downloadFilesAsZip: async (req, res) => {
+        try {
+            const { fileIds, zipName } = req.body;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+                return res.status(400).json({ error: 'File IDs array is required' });
+            }
+
+            console.log(`🔍 ZIP download request for ${fileIds.length} files by user: ${userId}`);
+
+            // Get file information for all requested files
+            const fileIdsParam = fileIds.map((id, index) => `@FileID${index}`).join(', ');
+            const request = pool.request();
+            fileIds.forEach((id, index) => {
+                request.input(`FileID${index}`, parseInt(id));
+            });
+            request.input('UserID', userId);
+
+            const query = `
+                SELECT FileID, DisplayName, BlobPath, ContentType
+                FROM tenderFile
+                WHERE FileID IN (${fileIds.map((_, i) => `@FileID${i}`).join(', ')})
+                  AND AddBy = @UserID
+                  AND IsDeleted = 0
+            `;
+
+            const result = await request.query(query);
+
+            if (result.recordset.length === 0) {
+                return res.status(404).json({ error: 'No files found' });
+            }
+
+            const files = result.recordset;
+            console.log(`📦 Found ${files.length} files to include in ZIP`);
+
+            // Set headers for ZIP download
+            const finalZipName = zipName || `drawings_${Date.now()}.zip`;
+            res.setHeader('Content-Type', 'application/zip');
+            res.setHeader('Content-Disposition', `attachment; filename="${finalZipName}"`);
+
+            // Create ZIP archive
+            const archive = archiver('zip', {
+                zlib: { level: 9 } // Maximum compression
+            });
+
+            // Handle archive errors
+            archive.on('error', (err) => {
+                console.error('Archive error:', err);
+                if (!res.headersSent) {
+                    res.status(500).json({ error: 'Failed to create ZIP archive' });
+                }
+            });
+
+            // Pipe archive data to response
+            archive.pipe(res);
+
+            // Add each file to the archive
+            const filePromises = files.map(async (file) => {
+                try {
+                    console.log(`📄 Adding file to ZIP: ${file.DisplayName}`);
+                    const stream = await downloadFile(file.BlobPath);
+                    
+                    if (stream) {
+                        // Use the original filename in the ZIP
+                        archive.append(stream, { name: file.DisplayName });
+                    } else {
+                        console.warn(`⚠️ Could not get stream for file: ${file.DisplayName}`);
+                    }
+                } catch (fileError) {
+                    console.error(`❌ Error adding file ${file.DisplayName} to ZIP:`, fileError);
+                    // Continue with other files even if one fails
+                }
+            });
+
+            // Wait for all files to be added
+            await Promise.all(filePromises);
+
+            // Finalize the archive
+            await archive.finalize();
+            console.log(`✅ ZIP archive created: ${finalZipName}`);
+
+        } catch (error) {
+            console.error('Error creating ZIP file:', error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Failed to create ZIP file', details: error.message });
+            }
         }
     }
 };

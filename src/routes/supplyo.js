@@ -1,0 +1,14 @@
+const express = require('express');
+const router = express.Router();
+const supplyoController = require('../controllers/supplyo/supplyoController');
+
+router.get('/', supplyoController.getAllCompanies);
+router.get('/:id', supplyoController.getCompanyById);
+router.get('/:id/contacts', supplyoController.getCompanyContacts);
+router.post('/', supplyoController.createCompany);
+router.put('/:id', supplyoController.updateCompany);
+router.delete('/:id', supplyoController.deleteCompany);
+router.post('/:id/contacts', supplyoController.createContact);
+router.delete('/contacts/:id', supplyoController.deleteContact);
+
+module.exports = router;

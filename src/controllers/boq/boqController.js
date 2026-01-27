@@ -3,6 +3,13 @@ const ExcelJS = require('exceljs');
 const { getConnectedPool } = require('../../config/database');
 const { downloadFile, uploadFile } = require('../../config/azureBlobService');
 const openAIService = require('../../config/openAIService');
+
+// Get validated OpenAI model name (handles typos like "o4-mini" -> "gpt-4o-mini")
+let validatedModelName = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+if (validatedModelName === 'o4-mini' || validatedModelName === 'gpt-o4-mini' || validatedModelName === 'gpt-gpt-o4-mini') {
+    validatedModelName = 'gpt-4o-mini';
+}
+const OPENAI_MODEL = validatedModelName;
 // Utility: expand compact range string like "1-3,5,9-10" to array of numbers
 function expandRangeString(rangeStr) {
   const result = [];
@@ -189,7 +196,7 @@ BOQ text (may be truncated):\n${truncated}`;
 
   try {
     const resp = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      model: OPENAI_MODEL,
       messages: [{ role: 'user', content: `${prompt}\n\nReturn only JSON.` }],
       max_tokens: 400,
       temperature: 0.2
@@ -255,7 +262,7 @@ BOQ text (may be truncated):\n${truncated}`;
 
   try {
     const resp = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      model: OPENAI_MODEL,
       messages: [{ role: 'user', content: `${prompt}\n\nReturn only JSON.` }],
       max_tokens: 3000,
       temperature: 0.1
@@ -674,7 +681,7 @@ Analyze the BOQ structure and identify the row ranges for each package. Do NOT c
     console.log('BOQ Structure sample:', boqStructure.slice(0, 10).map(row => `Row ${row.rowNumber}: ${row.content}`).join('\n'));
     
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      model: OPENAI_MODEL,
       messages: [{ role: 'user', content: `${prompt}\n\nReturn only JSON.` }],
       max_tokens: 2000,
       temperature: 0.1
@@ -1403,7 +1410,7 @@ BOQ text (may be truncated):\n${text.substring(0, 15000)}`;
     }
     
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      model: OPENAI_MODEL,
       messages: [{ role: 'user', content: `${prompt}\n\nReturn only JSON.` }],
       max_tokens: 2000,
       temperature: 0.1
@@ -2963,6 +2970,472 @@ const boqController = {
     } catch (error) {
       console.error('Error deleting BOQ:', error);
       res.status(500).json({ error: 'Failed to delete BOQ' });
+    }
+  },
+
+  // POST /api/boq/:tenderId/:fileId/packages/:packageName/rfq/:rfqId/compare-excel
+  compareExcelQuotation: async (req, res) => {
+    try {
+      const { tenderId, fileId, packageName, rfqId } = req.params;
+      const pool = await getConnectedPool();
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No Excel file uploaded' });
+      }
+
+      const uploadedFileBuffer = req.file.buffer;
+      const uploadedFileName = req.file.originalname;
+
+      // Check if uploaded file is Excel
+      const isExcel = uploadedFileName.toLowerCase().endsWith('.xlsx') || 
+                     uploadedFileName.toLowerCase().endsWith('.xls') ||
+                     req.file.mimetype.includes('spreadsheet');
+      
+      if (!isExcel) {
+        return res.status(400).json({ error: 'Uploaded file must be an Excel file (.xlsx or .xls)' });
+      }
+
+      // Get the original package Excel file (the one that was SENT for quotation)
+      // This is the split package Excel file, not the whole BOQ
+      // Package Excel files are named like: "PackageName_BOQ.xlsx"
+      const sanitizedPackageName = packageName.replace(/[^a-zA-Z0-9]/g, '_');
+      const expectedFileName = `${sanitizedPackageName}_BOQ.xlsx`;
+      
+      // First, get the folder where the original BOQ file is located
+      const boqFileQuery = await pool.request()
+        .input('FileID', parseInt(fileId))
+        .query(`
+          SELECT FolderID
+          FROM tenderFile
+          WHERE FileID = @FileID
+            AND (IsDeleted = 0 OR IsDeleted IS NULL)
+        `);
+
+      let originalFileBuffer = null;
+      let originalFileName = null;
+
+      if (boqFileQuery.recordset.length > 0) {
+        const boqFolderId = boqFileQuery.recordset[0].FolderID;
+        
+        // Find the package Excel file in the same folder (or tender root folder)
+        const packageFileQuery = await pool.request()
+          .input('TenderID', parseInt(tenderId))
+          .input('FolderID', boqFolderId)
+          .input('FileName', expectedFileName)
+          .query(`
+            SELECT TOP 1 FileID, DisplayName, BlobPath, ContentType, UploadedOn
+            FROM tenderFile
+            WHERE FolderID = @FolderID
+              AND DisplayName = @FileName
+              AND (IsDeleted = 0 OR IsDeleted IS NULL)
+            ORDER BY UploadedOn DESC
+          `);
+
+        if (packageFileQuery.recordset.length > 0) {
+          const originalFile = packageFileQuery.recordset[0];
+          originalFileName = originalFile.DisplayName;
+          const stream = await downloadFile(originalFile.BlobPath);
+          if (stream) {
+            originalFileBuffer = await streamToBuffer(stream);
+          }
+        } else {
+          // Fallback: try to find in tender root folder
+          const fallbackQuery = await pool.request()
+            .input('TenderID', parseInt(tenderId))
+            .input('FileName', expectedFileName)
+            .query(`
+              SELECT TOP 1 FileID, DisplayName, BlobPath, ContentType, UploadedOn
+              FROM tenderFile
+              WHERE FolderID IN (
+                SELECT TOP 1 FolderID FROM tenderFolder WHERE DocID = @TenderID ORDER BY FolderID ASC
+              )
+              AND DisplayName = @FileName
+              AND (IsDeleted = 0 OR IsDeleted IS NULL)
+              ORDER BY UploadedOn DESC
+            `);
+
+          if (fallbackQuery.recordset.length > 0) {
+            const originalFile = fallbackQuery.recordset[0];
+            originalFileName = originalFile.DisplayName;
+            const stream = await downloadFile(originalFile.BlobPath);
+            if (stream) {
+              originalFileBuffer = await streamToBuffer(stream);
+            }
+          }
+        }
+      }
+
+      if (!originalFileBuffer) {
+        return res.status(404).json({ 
+          error: 'Original package Excel file not found. Please ensure the package Excel file exists.' 
+        });
+      }
+
+      // Read both Excel files
+      const originalWorkbook = new ExcelJS.Workbook();
+      await originalWorkbook.xlsx.load(originalFileBuffer);
+      
+      const uploadedWorkbook = new ExcelJS.Workbook();
+      await uploadedWorkbook.xlsx.load(uploadedFileBuffer);
+
+      // Extract structured BOQ data from Excel files
+      const extractBOQData = (workbook, fileName) => {
+        const allItems = [];
+        const allRows = [];
+        
+        workbook.worksheets.forEach((worksheet) => {
+          // Extract all rows with data
+          worksheet.eachRow((row, rowNumber) => {
+            const rowValues = [];
+            row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
+              let value = cell.value;
+              if (value && typeof value === 'object') {
+                if (value.formula) {
+                  value = cell.result !== null && cell.result !== undefined 
+                    ? cell.result.toString() 
+                    : value.formula;
+                } else if (value.richText) {
+                  value = value.richText.map(rt => rt.text).join('');
+                } else {
+                  value = JSON.stringify(value);
+                }
+              }
+              rowValues.push({
+                col: colNumber,
+                value: value !== null && value !== undefined ? String(value).trim() : ''
+              });
+            });
+            
+            if (rowValues.length > 0) {
+              const rowText = rowValues.map(c => c.value).join(' | ');
+              allRows.push({
+                sheet: worksheet.name,
+                row: rowNumber,
+                values: rowValues,
+                text: rowText
+              });
+              
+              // Try to identify BOQ items (rows with descriptions and quantities/prices)
+              // Look for patterns: description in early columns, numbers in later columns
+              const hasDescription = rowValues.some((v, idx) => idx < 5 && v.value && v.value.length > 3);
+              const hasNumbers = rowValues.some((v, idx) => idx >= 2 && !isNaN(parseFloat(v.value)) && parseFloat(v.value) > 0);
+              
+              if (hasDescription && hasNumbers) {
+                // Extract potential item details
+                const description = rowValues.slice(0, 3).map(v => v.value).filter(v => v).join(' ').trim();
+                const numbers = rowValues.map(v => {
+                  const num = parseFloat(v.value);
+                  return !isNaN(num) && num > 0 ? num : null;
+                }).filter(n => n !== null);
+                
+                if (description && description.length > 5 && numbers.length > 0) {
+                  allItems.push({
+                    sheet: worksheet.name,
+                    row: rowNumber,
+                    description: description,
+                    numbers: numbers,
+                    fullRow: rowText
+                  });
+                }
+              }
+            }
+          });
+        });
+        
+        return {
+          fileName,
+          totalRows: allRows.length,
+          items: allItems,
+          allRows: allRows.slice(0, 100) // Limit to first 100 rows for AI analysis
+        };
+      };
+
+      const originalBOQ = extractBOQData(originalWorkbook, originalFileName);
+      const uploadedBOQ = extractBOQData(uploadedWorkbook, uploadedFileName);
+
+      // Use OpenAI to compare the BOQ files with deep analysis
+      const comparisonPrompt = `You are a BOQ (Bill of Quantities) expert analyzing two Excel files:
+1. ORIGINAL FILE: A BOQ quotation request that was SENT to a client (${originalFileName})
+2. RETURNED FILE: The client's quotation RESPONSE (${uploadedFileName})
+
+CRITICAL INSTRUCTIONS:
+- The original file is a BOQ with line items (descriptions, quantities, unit prices, totals)
+- The returned file may have items written differently but they might be the same
+- You must do FUZZY MATCHING: items with similar descriptions but different wording are likely the SAME item
+- Missing items are items from original that cannot be found in returned (even with very flexible fuzzy matching)
+- Extra items are NEW charges/items in returned that don't match anything in original
+- Pay special attention to extra charges, additional items, or unexpected line items
+- PRICES ARE IRRELEVANT: Do not compare prices, amounts, or values - we only care about missing/extra items
+
+ORIGINAL BOQ FILE (Sent for Quotation):
+File: ${originalFileName}
+Total Rows: ${originalBOQ.totalRows}
+Items Found: ${originalBOQ.items.length}
+
+Sample Items:
+${originalBOQ.items.slice(0, 30).map((item, idx) => 
+  `${idx + 1}. Row ${item.row} [${item.sheet}]: "${item.description}" | Numbers: ${item.numbers.join(', ')}`
+).join('\n')}
+
+Full Row Data (first 50 rows):
+${originalBOQ.allRows.slice(0, 50).map(r => `Row ${r.row} [${r.sheet}]: ${r.text}`).join('\n')}
+
+RETURNED QUOTATION FILE (Client Response):
+File: ${uploadedFileName}
+Total Rows: ${uploadedBOQ.totalRows}
+Items Found: ${uploadedBOQ.items.length}
+
+Sample Items:
+${uploadedBOQ.items.slice(0, 30).map((item, idx) => 
+  `${idx + 1}. Row ${item.row} [${item.sheet}]: "${item.description}" | Numbers: ${item.numbers.join(', ')}`
+).join('\n')}
+
+Full Row Data with Column Numbers (first 50 rows):
+${uploadedBOQ.allRows.slice(0, 50).map(r => {
+  const colInfo = r.values.map((v) => {
+    // Convert col number to letter (1=A, 2=B, etc.)
+    let colLetter = '';
+    let colNum = v.col;
+    while (colNum > 0) {
+      colLetter = String.fromCharCode(64 + ((colNum - 1) % 26) + 1) + colLetter;
+      colNum = Math.floor((colNum - 1) / 26);
+    }
+    return `${colLetter}${r.row}: "${v.value.substring(0, 50)}"`;
+  }).join(', ');
+  return `Row ${r.row} [${r.sheet}]: ${colInfo}`;
+}).join('\n')}
+
+YOUR TASK - FOLLOW THIS EXACT PROCESS:
+
+STEP 1: SYSTEMATIC MATCHING
+- Create a list of ALL items from the original file
+- For EACH original item, search the ENTIRE returned file systematically
+- Use these matching strategies (try ALL of them):
+  1. Exact match (case-insensitive, ignore extra spaces/punctuation)
+  2. Key word extraction: Extract 2-3 main words from original, check if they appear in returned
+  3. Partial match: If 70%+ of meaningful words match, it's a match
+  4. Number/code prefix removal: "3B Access to site" matches "Access to site" (strip leading codes)
+  5. Abbreviation/synonym: "Site Clearance" matches "Clearance", "Site Clearance Works", "Clearing"
+  6. Stem matching: "Demolition" matches "Demolish", "Demolition work", "Demolishing"
+  
+- If ANY strategy finds a match, mark the original item as "FOUND" and move to next item
+- If ALL strategies fail, mark the original item as "MISSING"
+
+STEP 2: IDENTIFY MISSING ITEMS (CRITICAL - THIS IS ESSENTIAL)
+- After completing STEP 1, collect ALL items marked as "MISSING"
+- For each missing item, include:
+  - The exact description from original
+  - Row number from original
+  - Sheet name from original
+- BE THOROUGH - missing items are critical for catching errors
+- If an item from original has NO match in returned (after trying all strategies), it MUST be listed
+
+STEP 3: IDENTIFY EXTRA ITEMS
+- Find all items in returned that don't match any item in original
+- This is working well, continue doing it
+
+STEP 4: DISCREPANCIES
+- DO NOT identify price/money discrepancies
+- Always return empty array []
+
+CRITICAL RULES FOR EXTRA ITEMS:
+- List ALL new charges/items not in original - this is working well, keep doing it
+
+CRITICAL RULES FOR DISCREPANCIES:
+- DO NOT include price/money discrepancies at all
+- DO NOT flag items where original = €0 and returned has a price (this is EXPECTED)
+- DO NOT flag any price changes - prices are irrelevant for comparison
+- Leave discrepancies array EMPTY - we only care about missing/extra items
+
+Return ONLY valid JSON with this exact structure:
+{
+  "status": "complete" | "incomplete" | "partial" | "extra_items" | "missing_items",
+  "summary": "ONE concise sentence summarizing the comparison result",
+  "missingItems": [
+    {
+      "description": "Short item description (max 100 chars)",
+      "row": "Row number",
+      "sheet": "Sheet name"
+    }
+  ],
+  "extraItems": [
+    {
+      "description": "Short item description (max 100 chars)",
+      "row": "Row number (as integer)",
+      "col": "Column letter (A, B, C, etc.) where the description text is located - REQUIRED",
+      "amount": "Amount if available",
+      "warning": "extra_charge | unexpected_item"
+    }
+  ],
+  "discrepancies": [],
+  "matchedItems": "Number of successfully matched items",
+  "completeness": "Percentage (e.g., '67%')",
+  "recommendations": [
+    "ONE actionable recommendation per issue - be direct and specific"
+  ]
+}
+
+IMPORTANT: 
+- Keep descriptions SHORT (truncate long descriptions)
+- NO repetition - all information should be in missingItems and extraItems sections only
+- NO warnings section - all warnings should be implicit in the missingItems and extraItems descriptions
+- Be ASSERTIVE and DIRECT in language
+- If "Extra Charge for Bein too Nice 2500" exists, it MUST be in extraItems
+- MISSING ITEMS DETECTION (CRITICAL - THIS IS THE MOST IMPORTANT PART):
+  * SYSTEMATIC PROCESS: Go through EVERY item from original file, one by one
+  * For EACH original item, perform a COMPREHENSIVE SEARCH in the returned file:
+    1. Extract key words from original item (ignore numbers, codes, common words like "the", "and")
+    2. Search returned file for items containing those key words
+    3. Try exact match first, then partial, then fuzzy
+    4. Ignore leading codes/numbers (e.g., "3B Access" matches "Access to site")
+    5. Check for abbreviations and synonyms
+  * MATCHING EXAMPLES (these are NOT missing - they match):
+    - Original: "3B Access to site" → Returned: "Access to site" = MATCH ✓
+    - Original: "Site clearance" → Returned: "Site Clearance Works" = MATCH ✓
+    - Original: "Boundaries" → Returned: "3A Boundaries" = MATCH ✓
+    - Original: "Demolition" → Returned: "Demolition work" = MATCH ✓
+    - Original: "Electrical" → Returned: "Electrical installation" = MATCH ✓
+  * MISSING EXAMPLES (these ARE missing - list them):
+    - Original: "Demolition work" → Returned: has NO items with "demolition", "demolish", "remove" = MISSING ✗
+    - Original: "Electrical installation" → Returned: has NO items with "electrical", "electric", "wiring" = MISSING ✗
+    - Original: "Plumbing works" → Returned: has NO items with "plumbing", "pipe", "water" = MISSING ✗
+  * CRITICAL: If you cannot find a match after trying ALL strategies, the item MUST be listed as missing
+  * DO NOT skip items - missing items detection is essential for catching errors
+  * REMEMBER: Missing items are items from ORIGINAL that are NOT in RETURNED - if an item exists in original but you cannot find it in returned (even with all matching strategies), it IS missing and MUST be listed
+- Do NOT create a warnings array - the missingItems and extraItems sections contain all necessary information
+- For extraItems, ALWAYS include the "col" field with the column letter (A, B, C, etc.) where the description is found in the Excel file
+- Use the column information from the Full Row Data to identify which column contains the description text
+- DISCREPANCIES: Always return an empty array [] - we do NOT want price/money discrepancies
+
+FINAL REMINDER - MISSING ITEMS DETECTION:
+- You MUST go through EVERY item from the original file systematically
+- For each original item, search the returned file thoroughly using ALL matching strategies
+- If you cannot find a match using any matching strategy, the item IS MISSING and MUST be listed
+- Missing items are critical - they help catch errors where clients forgot to include items
+- DO NOT be too conservative - if an item from original truly doesn't exist in returned, list it as missing
+- The missingItems array should contain ALL items from original that cannot be found in returned after thorough searching`;
+
+      const aiResponse = await openAIService.query(comparisonPrompt);
+      let comparisonResult;
+      
+      try {
+        // Try to parse JSON from AI response
+        const jsonMatch = aiResponse.generated_query.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          comparisonResult = JSON.parse(jsonMatch[0]);
+          
+          // Force discrepancies to be empty - we don't want price/money discrepancies
+          comparisonResult.discrepancies = [];
+        } else {
+          throw new Error('No JSON found in response');
+        }
+      } catch (parseError) {
+        // Fallback: create a basic comparison
+        comparisonResult = {
+          status: 'unknown',
+          summary: 'Unable to parse AI comparison. Please review manually.',
+          missingItems: [],
+          extraItems: [],
+          discrepancies: [],
+          completeness: 'Unknown',
+          recommendations: ['Please manually review the files']
+        };
+      }
+      
+      // Ensure discrepancies is always empty (we don't want price discrepancies)
+      if (comparisonResult && comparisonResult.discrepancies) {
+        comparisonResult.discrepancies = [];
+      }
+
+      // Save the uploaded file to database with comparison metadata
+      const userId = req.user?.UserID || null;
+      
+      // Get folder ID for RFQ files - use BOQ folder (same as other RFQ attachments)
+      let folderId = null;
+      try {
+        // Find BOQ folder for this tender
+        const boqFolder = await pool.request()
+          .input('TenderID', parseInt(tenderId))
+          .query(`
+            SELECT TOP 1 tf.FolderID
+            FROM tenderFolder tf
+            WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.FolderName = 'BOQ'
+          `);
+        
+        if (boqFolder.recordset.length > 0) {
+          folderId = boqFolder.recordset[0].FolderID;
+        } else {
+          // Try to get tender root folder as fallback
+          const tenderRoot = await pool.request()
+            .input('TenderID', parseInt(tenderId))
+            .query(`
+              SELECT TOP 1 tf.FolderID
+              FROM tenderFolder tf
+              WHERE tf.DocID = @TenderID AND tf.ConnectionTable = 'tenderTender' AND tf.ParentFolderID = 2
+            `);
+          if (tenderRoot.recordset.length > 0) {
+            folderId = tenderRoot.recordset[0].FolderID;
+          }
+        }
+      } catch (folderError) {
+        console.warn('Warning: failed to resolve BOQ folder, continuing without folderId', folderError);
+      }
+      
+      // Upload file to Azure Blob Storage
+      const timestamp = Date.now();
+      const safeFileName = uploadedFileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const blobPath = `uploads/${timestamp}_${safeFileName}`;
+      await uploadFile(blobPath, uploadedFileBuffer, req.file.mimetype);
+      
+      // Prepare metadata with comparison results
+      const metadata = {
+        type: 'client_quotation',
+        comparison: comparisonResult,
+        originalFileName: originalFileName,
+        comparedAt: new Date().toISOString(),
+        packageName: packageName
+      };
+      
+      // Save file to database
+      const fileResult = await pool.request()
+        .input('AddBy', userId ? parseInt(userId) : null)
+        .input('FolderID', folderId)
+        .input('BlobPath', blobPath)
+        .input('DisplayName', uploadedFileName)
+        .input('Size', uploadedFileBuffer.length)
+        .input('ContentType', req.file.mimetype)
+        .input('Status', 1)
+        .input('DocID', parseInt(rfqId))
+        .input('ConnectionTable', 'dbo.tenderPackageRFQ')
+        .input('Metadata', JSON.stringify(metadata))
+        .input('ExtractedText', null)
+        .query(`
+          INSERT INTO tenderFile (AddBy, FolderID, BlobPath, DisplayName, UploadedOn, Size, ContentType, Status, DocID, ConnectionTable, Metadata, ExtractedText, IsDeleted)
+          VALUES (@AddBy, @FolderID, @BlobPath, @DisplayName, GETDATE(), @Size, @ContentType, @Status, @DocID, @ConnectionTable, @Metadata, @ExtractedText, 0);
+          SELECT SCOPE_IDENTITY() as FileID;
+        `);
+      
+      const savedFileId = fileResult.recordset[0]?.FileID;
+
+      return res.json({
+        success: true,
+        comparison: comparisonResult,
+        originalFileName,
+        uploadedFileName,
+        originalItemCount: originalBOQ.items.length,
+        uploadedItemCount: uploadedBOQ.items.length,
+        originalRowCount: originalBOQ.totalRows,
+        uploadedRowCount: uploadedBOQ.totalRows,
+        fileId: savedFileId,
+        message: 'File uploaded and compared successfully'
+      });
+
+    } catch (error) {
+      console.error('Error comparing Excel files:', error);
+      res.status(500).json({ 
+        error: 'Failed to compare Excel files', 
+        message: error.message 
+      });
     }
   }
 };

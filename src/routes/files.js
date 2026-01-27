@@ -68,9 +68,7 @@ router.delete('/:fileId', fileController.deleteFile);
 // Get file preview URL
 router.get('/:fileId/preview', fileController.getFilePreviewUrl);
 
-module.exports = router;
-
-// Get file preview URL
-router.get('/:fileId/preview', fileController.getFilePreviewUrl);
+// Download multiple files as ZIP
+router.post('/download-zip', fileController.downloadFilesAsZip);
 
 module.exports = router;

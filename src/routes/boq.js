@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const boqController = require('../controllers/boq/boqController');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
 
 // GET propose breakdown for a BOQ file
 router.get('/:tenderId/:fileId/propose', boqController.proposeBreakdown);
@@ -41,20 +43,13 @@ router.get('/:tenderId/:fileId/packages/dashboard', boqController.getPackageDash
 // GET breakdown coverage report
 router.get('/:tenderId/:fileId/breakdown-report', boqController.breakdownReport);
 
-// DELETE BOQ and its file (soft-delete file)
-router.delete('/:tenderId/:fileId', boqController.deleteBoQ);
-
-module.exports = router;
-
-
-// GET package dashboard stats
-router.get('/:tenderId/:fileId/packages/dashboard', boqController.getPackageDashboardStats);
-
-// GET breakdown coverage report
-router.get('/:tenderId/:fileId/breakdown-report', boqController.breakdownReport);
+// POST compare Excel quotation with original package file
+router.post('/:tenderId/:fileId/packages/:packageName/rfq/:rfqId/compare-excel', 
+  upload.single('file'), 
+  boqController.compareExcelQuotation
+);
 
 // DELETE BOQ and its file (soft-delete file)
 router.delete('/:tenderId/:fileId', boqController.deleteBoQ);
 
 module.exports = router;
-

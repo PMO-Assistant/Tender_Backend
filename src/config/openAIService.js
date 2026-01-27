@@ -5,7 +5,14 @@ const XLSX = require('xlsx');
 require('dotenv').config();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+// Validate and sanitize model name - fix common typos
+let modelName = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+// Fix common typos: "o4-mini" -> "gpt-4o-mini", "gpt-o4-mini" -> "gpt-4o-mini"
+if (modelName === 'o4-mini' || modelName === 'gpt-o4-mini' || modelName === 'gpt-gpt-o4-mini') {
+    console.warn(`⚠️  Invalid model name "${modelName}" detected. Using "gpt-4o-mini" instead.`);
+    modelName = 'gpt-4o-mini';
+}
+const OPENAI_MODEL = modelName;
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 
 if (!OPENAI_API_KEY) {

@@ -236,87 +236,8 @@ async function sendTaskNotification(pool, taskId, userId, notificationText, type
         }
       }
       
-      // Send email notifications to users with emails
-      try {
-        // Get user details with emails for email notifications
-        const usersWithEmails = [];
-        for (const notifyUserId of uniqueUsers) {
-          try {
-            console.log(`[EMAIL] Querying user details for UserID: ${notifyUserId}`);
-            const userDetailResult = await pool.request()
-              .input('UserID', notifyUserId)
-              .query('SELECT UserID, Name, Email, Status FROM tenderEmployee WHERE UserID = @UserID');
-            
-            console.log(`[EMAIL] Raw user query result for ${notifyUserId}:`, userDetailResult.recordset);
-            
-            const userDetail = userDetailResult.recordset[0];
-            if (userDetail) {
-              console.log(`[EMAIL] User detail found:`, {
-                UserID: userDetail.UserID,
-                Name: userDetail.Name,
-                Email: userDetail.Email,
-                Status: userDetail.Status,
-                NameType: typeof userDetail.Name,
-                EmailType: typeof userDetail.Email
-              });
-              
-              if (userDetail.Email && (userDetail.Status === 1 || userDetail.Status === true || userDetail.Status === 'True')) {
-                usersWithEmails.push({
-                  UserID: userDetail.UserID,
-                  Name: userDetail.Name,
-                  Email: userDetail.Email
-                });
-                console.log(`[EMAIL] Added user to email list: ${userDetail.Name} (${userDetail.Email})`);
-              } else {
-                console.log(`[EMAIL] Skipping user ${notifyUserId}: Email=${userDetail.Email}, Status=${userDetail.Status}`);
-              }
-            } else {
-              console.log(`[EMAIL] No user found for UserID: ${notifyUserId}`);
-            }
-          } catch (emailError) {
-            console.error(`[EMAIL] Error getting email for user ${notifyUserId}:`, emailError);
-          }
-        }
-        
-        console.log(`[EMAIL] Users with emails: ${usersWithEmails.length}`)
-        
-        if (usersWithEmails.length > 0) {
-          // Get task details for email
-          const taskDetailResult = await pool.request()
-            .input('TaskID', taskId)
-            .query('SELECT Description, Priority, Status, DueDate, Tender FROM tenderTask WHERE TaskID = @TaskID');
-          
-          const taskDetail = taskDetailResult.recordset[0];
-          if (taskDetail) {
-            const emailData = {
-              taskId: taskId,
-              taskTitle: taskDetail.Description || 'Untitled Task',
-              taskDescription: taskDetail.Description || 'No description',
-              priority: taskDetail.Priority || 'medium',
-              status: taskDetail.Status || 'todo',
-              dueDate: taskDetail.DueDate ? new Date(taskDetail.DueDate).toLocaleDateString() : 'No due date',
-              projectName: taskDetail.Tender || 'No project',
-              creatorName: userName,
-              updaterName: userName,
-              completerName: userName,
-              deleterName: userName
-            };
-            
-            // Determine email template type based on notification type
-            let emailTemplateType = 'taskUpdated';
-            if (type === 'task_created') emailTemplateType = 'taskCreated';
-            else if (type === 'task_completed') emailTemplateType = 'taskCompleted';
-            else if (type === 'task_deleted') emailTemplateType = 'taskDeleted';
-            
-            console.log(`[EMAIL] Sending ${emailTemplateType} emails to ${usersWithEmails.length} users`);
-            const emailResults = await sendBulkEmailNotifications(usersWithEmails, emailTemplateType, emailData);
-            console.log(`[EMAIL] Email results:`, emailResults);
-          }
-        }
-      } catch (emailError) {
-        console.error('[EMAIL] Error sending email notifications:', emailError);
-        // Don't fail the notification if email fails
-      }
+      // Email notifications disabled - only in-app notifications are sent
+      console.log(`[EMAIL] Email notifications disabled - skipping email sending`)
       
       console.log(`[NOTIFICATION] All notifications sent successfully`)
     } else {
@@ -616,6 +537,7 @@ const taskController = {
             t.Priority,
             t.Tender,
             t.WhatchlistID,
+            t.BD,
             -- Status field (default to 'todo' if not set)
             COALESCE(t.Status, 'todo') as Status,
             -- Creator info
@@ -652,6 +574,7 @@ const taskController = {
         Priority: row.Priority,
         Tender: row.Tender,
         WhatchlistID: row.WhatchlistID,
+        BD: row.BD,
         Status: row.Status,
         CreatorName: row.CreatorName,
         CreatorEmail: row.CreatorEmail,
@@ -794,6 +717,7 @@ const taskController = {
             t.Priority,
             t.Tender,
             t.WhatchlistID,
+            t.BD,
             -- Status field (default to 'todo' if not set)
             COALESCE(t.Status, 'todo') as Status,
             -- Creator info
@@ -804,14 +728,20 @@ const taskController = {
             completedBy.Email as CompletedByEmail,
             -- Tender info
             tender.ProjectName as TenderName,
-            watchlist.ProjectName as WatchlistName
+            watchlist.ProjectName as WatchlistName,
+            -- BD info
+            bd.Description as BDDescription,
+            bd.Date as BDDate
           FROM tenderTask t
           LEFT JOIN tenderEmployee creator ON t.AddBy = creator.UserID
           LEFT JOIN tenderEmployee completedBy ON t.CompletedBy = completedBy.UserID
           LEFT JOIN tenderTender tender ON t.Tender = tender.TenderID
           LEFT JOIN tenderWhatchlist watchlist ON t.WhatchlistID = watchlist.WhatchlistID
+          LEFT JOIN tenderBD bd ON t.BD = bd.BDID
           WHERE t.TaskID = @TaskID
-            AND t.AddBy = @UserID
+            AND (t.AddBy = @UserID OR t.TaskID IN (
+              SELECT TaskID FROM tenderTaskAssignee WHERE UserID = @UserID
+            ))
         `);
 
       if (result.recordset.length === 0) {
@@ -844,13 +774,16 @@ const taskController = {
           Priority: task.Priority,
           Tender: task.Tender,
           WhatchlistID: task.WhatchlistID,
+          BD: task.BD,
           Status: task.Status,
           CreatorName: task.CreatorName,
           CreatorEmail: task.CreatorEmail,
           CompletedByName: task.CompletedByName,
           CompletedByEmail: task.CompletedByEmail,
           TenderName: task.TenderName || null,
-          WatchlistName: task.WatchlistName || null
+          WatchlistName: task.WatchlistName || null,
+          BDDescription: task.BDDescription || null,
+          BDDate: task.BDDate || null
         }
       });
     } catch (error) {
@@ -882,7 +815,7 @@ const taskController = {
         });
       }
 
-      // Validate that task is assigned to either tender or watchlist (not both)
+      // Validate that task is not assigned to both tender and watchlist (if both are provided)
       if (Tender && WhatchlistID) {
         return res.status(400).json({
           error: 'Validation failed',
@@ -890,12 +823,7 @@ const taskController = {
         });
       }
 
-      if (!Tender && !WhatchlistID) {
-        return res.status(400).json({
-          error: 'Validation failed',
-          message: 'Task must be assigned to either a tender or watchlist project'
-        });
-      }
+      // Note: Tender and WhatchlistID are both optional - tasks can exist without either
 
       const pool = await getConnectedPool();
       const userId = req.user.UserID;
@@ -928,6 +856,20 @@ const taskController = {
         }
       }
 
+      // Check if BD exists (only if provided)
+      if (BD) {
+        const bdCheck = await pool.request()
+          .input('BDID', BD)
+          .query('SELECT BDID FROM tenderBD WHERE BDID = @BDID');
+
+        if (bdCheck.recordset.length === 0) {
+          return res.status(400).json({
+            error: 'Invalid BD',
+            message: 'The specified BD entry does not exist'
+          });
+        }
+      }
+
       // Insert new task without assignees
       const result = await pool.request()
         .input('AddBy', userId)
@@ -937,11 +879,12 @@ const taskController = {
         .input('Priority', Priority || 'Medium')
         .input('Tender', Tender || null)
         .input('WhatchlistID', WhatchlistID || null)
+        .input('BD', BD || null)
         .input('Status', 'todo')
         .query(`
-          INSERT INTO tenderTask (AddBy, Description, StartDate, DueDate, Priority, Tender, WhatchlistID, Status)
+          INSERT INTO tenderTask (AddBy, Description, StartDate, DueDate, Priority, Tender, WhatchlistID, BD, Status)
           OUTPUT INSERTED.TaskID
-          VALUES (@AddBy, @Description, @StartDate, @DueDate, @Priority, @Tender, @WhatchlistID, @Status)
+          VALUES (@AddBy, @Description, @StartDate, @DueDate, @Priority, @Tender, @WhatchlistID, @BD, @Status)
         `);
 
       const taskId = result.recordset[0].TaskID;
@@ -961,7 +904,7 @@ const taskController = {
         // ignore timeline errors
       }
 
-      // Send notifications to task creator
+      // Send notifications to task creator (in-app notifications only, no emails)
       try {
         // Get creator name for notification
         const creatorResult = await pool.request()
@@ -974,47 +917,11 @@ const taskController = {
         // Create notification text
         const notificationText = `Task "${Description}" created${projectName}`;
         
-        // Send notification to creator
+        // Send in-app notification only (no emails - emails are disabled in sendTaskNotification)
         await sendTaskNotification(pool, taskId, userId, notificationText, 'task_created', `/tasks/${taskId}`);
       } catch (notificationError) {
         console.error('Error sending task creation notifications:', notificationError);
         // Don't fail the task creation if notifications fail
-      }
-
-      // Send email notifications for new task creation (if assignees exist)
-      try {
-        const taskData = {
-          title: Description,
-          description: Description,
-          priority: Priority || 'medium',
-          status: 'todo',
-          dueDate: DueDate,
-          projectName: 'No project'
-        };
-
-        // Get project info if available
-        if (Tender) {
-          const tenderResult = await pool.request()
-            .input('TenderID', Tender)
-            .query('SELECT ProjectName FROM tenderTender WHERE TenderID = @TenderID');
-          
-          if (tenderResult.recordset.length > 0) {
-            taskData.projectName = tenderResult.recordset[0].ProjectName;
-          }
-        } else if (WhatchlistID) {
-          const watchlistResult = await pool.request()
-            .input('WhatchlistID', WhatchlistID)
-            .query('SELECT ProjectName FROM tenderWhatchlist WHERE WhatchlistID = @WhatchlistID');
-          
-          if (watchlistResult.recordset.length > 0) {
-            taskData.projectName = watchlistResult.recordset[0].ProjectName;
-          }
-        }
-
-        // Email notifications are now handled in sendTaskNotification
-      } catch (emailError) {
-        console.error('Error sending email notifications for task creation:', emailError);
-        // Don't fail the task creation if email fails
       }
 
       res.status(201).json({
@@ -1041,7 +948,8 @@ const taskController = {
         DueDate,
         Priority,
         Tender,
-        WhatchlistID
+        WhatchlistID,
+        BD
       } = req.body;
 
       const pool = await getConnectedPool();
@@ -1093,6 +1001,23 @@ const taskController = {
       if (WhatchlistID !== undefined) {
         updateFields.push('WhatchlistID = @WhatchlistID')
         request.input('WhatchlistID', WhatchlistID)
+      }
+      if (BD !== undefined) {
+        // Validate BD if provided
+        if (BD !== null) {
+          const bdCheck = await pool.request()
+            .input('BDID', BD)
+            .query('SELECT BDID FROM tenderBD WHERE BDID = @BDID');
+
+          if (bdCheck.recordset.length === 0) {
+            return res.status(400).json({
+              error: 'Invalid BD',
+              message: 'The specified BD entry does not exist'
+            });
+          }
+        }
+        updateFields.push('BD = @BD')
+        request.input('BD', BD)
       }
 
       // Always update UpdatedAt
@@ -1504,14 +1429,18 @@ const taskController = {
             projectName: taskDetails.ProjectName || 'No project'
           };
 
-          // Send email only to the newly assigned user
+          // Email notifications disabled - no emails sent when adding assignees
           const newAssignee = await getUserDetails(pool, newUserId);
           if (newAssignee && newAssignee.email) {
+            console.log(`[EMAIL] Email notifications disabled - skipping email to ${newAssignee.email}`)
+            // Email sending disabled
+            /*
             await sendEmailNotification(newAssignee.email, 'taskCreated', {
               ...taskData,
               taskId: taskId,
               creatorName: requesterName
             });
+            */
           }
         }
       } catch (emailError) {

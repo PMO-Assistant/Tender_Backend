@@ -118,6 +118,15 @@ try {
 }
 
 try {
+  console.log('🔄 Loading Supplyo routes...');
+  const supplyoRoutes = require('./routes/supplyo');
+  app.use('/api/supplyo', authenticateToken, requireCompanyPermission, supplyoRoutes);
+  console.log('✅ Supplyo routes loaded');
+} catch (error) {
+  console.error('❌ Error loading Supplyo routes:', error.message);
+}
+
+try {
   console.log('🔄 Loading contact routes...');
   const contactRoutes = require('./routes/contact');
   app.use('/api/contact', authenticateToken, requireContactPermission, contactRoutes);
@@ -204,6 +213,15 @@ try {
 }
 
 try {
+  console.log('🔄 Loading BD routes...');
+  const bdRoutes = require('./routes/bd');
+  app.use('/api/bd', bdRoutes);
+  console.log('✅ BD routes loaded');
+} catch (error) {
+  console.error('❌ Error loading BD routes:', error.message);
+}
+
+try {
   console.log('🔄 Loading task attachment routes...');
   const taskAttachmentRoutes = require('./routes/taskAttachment');
   app.use('/api/task-attachments', authenticateToken, requireTaskPermission, taskAttachmentRoutes);
@@ -228,6 +246,15 @@ try {
   console.log('✅ Org chart routes loaded');
 } catch (error) {
   console.error('❌ Error loading org chart routes:', error.message);
+}
+
+try {
+  console.log('🔄 Loading drawing routes...');
+  const drawingRoutes = require('./routes/drawing');
+  app.use('/api/drawing', authenticateToken, hasAnyPermission, drawingRoutes);
+  console.log('✅ Drawing routes loaded');
+} catch (error) {
+  console.error('❌ Error loading drawing routes:', error.message);
 }
 
 try {
@@ -311,6 +338,10 @@ try {
   console.log('🔄 Loading Planning News routes...');
   const planningNewsRoutes = require('./routes/planningNews');
   app.use('/api/planning-news', planningNewsRoutes);
+
+  // Share routes (public access for viewing, authenticated for management)
+  const shareRoutes = require('./routes/share');
+  app.use('/api/share', shareRoutes);
   console.log('✅ Planning News routes loaded');
 } catch (error) {
   console.error('❌ Error loading Planning News routes:', error.message);

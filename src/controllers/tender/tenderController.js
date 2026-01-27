@@ -399,13 +399,20 @@ const tenderController = {
             // 1) Insert tender and get new TenderID
             const addByUser = AddBy || (req.user && req.user.UserID) || null;
 
+            // Convert Value to numeric (handle empty string, null, or undefined)
+            let numericValue = null;
+            if (Value !== null && Value !== undefined && Value !== '') {
+                const parsed = parseFloat(String(Value).replace(/[€,\s]/g, ''));
+                numericValue = isNaN(parsed) ? null : parsed;
+            }
+
             const insertTenderResult = await pool.request()
                 .input('CompanyID', CompanyID)
                 .input('AddBy', addByUser)
                 .input('ProjectName', ProjectName)
                 .input('OpenDate', OpenDate)
                 .input('ApplyTo', ApplyTo)
-                .input('Value', Value)
+                .input('Value', numericValue)
                 .input('ReturnDate', ReturnDate)
                 .input('Status', Status)
                 .input('Type', Type)
