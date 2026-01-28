@@ -365,21 +365,28 @@ function convertRowAssignmentsToRanges(rowPackageAssignments, allPackages) {
   
   // Process all sheet assignments
   for (const [sheetName, rowAssignments] of Object.entries(rowPackageAssignments)) {
-    for (const [rowIndexStr, packageName] of Object.entries(rowAssignments)) {
+    for (const [rowIndexStr, packageValue] of Object.entries(rowAssignments)) {
       const rowIndex = parseInt(rowIndexStr, 10);
-      
-      if (!packageName || packageName.trim() === '') continue;
-      
-      if (packageName === 'Global') {
-        globalRows.push({ sheetName, rowIndex });
-      } else {
-        if (!packageRangesBySheet[packageName]) {
-          packageRangesBySheet[packageName] = {};
+
+      // Support both single string and array of package names
+      const packageNames = Array.isArray(packageValue) ? packageValue : [packageValue];
+
+      for (const rawName of packageNames) {
+        if (!rawName) continue;
+        const packageName = String(rawName).trim();
+        if (!packageName) continue;
+
+        if (packageName === 'Global') {
+          globalRows.push({ sheetName, rowIndex });
+        } else {
+          if (!packageRangesBySheet[packageName]) {
+            packageRangesBySheet[packageName] = {};
+          }
+          if (!packageRangesBySheet[packageName][sheetName]) {
+            packageRangesBySheet[packageName][sheetName] = [];
+          }
+          packageRangesBySheet[packageName][sheetName].push(rowIndex);
         }
-        if (!packageRangesBySheet[packageName][sheetName]) {
-          packageRangesBySheet[packageName][sheetName] = [];
-        }
-        packageRangesBySheet[packageName][sheetName].push(rowIndex);
       }
     }
   }
