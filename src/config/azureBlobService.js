@@ -1,14 +1,16 @@
-const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const { DefaultAzureCredential } = require('@azure/identity');
 require('dotenv').config();
 
 const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
 const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
-const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+// Use DefaultAzureCredential for RBAC support
+// This will use managed identity in Azure, or fall back to Azure CLI/service principal locally
+const credential = new DefaultAzureCredential();
 const blobServiceClient = new BlobServiceClient(
     `https://${account}.blob.core.windows.net`,
-    sharedKeyCredential
+    credential
 );
 
 const containerClient = blobServiceClient.getContainerClient(containerName);
@@ -73,11 +75,23 @@ async function deleteFolder(folderPath) {
     }
 }
 
+// Helper function to get blob service client (for use in other files)
+function getBlobServiceClient() {
+    return blobServiceClient;
+}
+
+// Helper function to get container client (for use in other files)
+function getContainerClient() {
+    return containerClient;
+}
+
 module.exports = {
     uploadFile,
     downloadFile,
     deleteFile,
-    deleteFolder
+    deleteFolder,
+    getBlobServiceClient,
+    getContainerClient
 };
 
 

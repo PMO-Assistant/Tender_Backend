@@ -1299,21 +1299,22 @@ ORDER BY f.CreatedAt DESC;
 
             // Upload to Azure Blob Storage FIRST (before extraction, so file exists when we try to download it)
             try {
-                const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+                const { BlobServiceClient } = require('@azure/storage-blob');
+                const { DefaultAzureCredential } = require('@azure/identity');
                 
                 const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-                const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
                 const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
-                if (!account || !accountKey || !containerName) {
+                if (!account || !containerName) {
                     console.error('Azure Storage configuration missing');
                     return res.status(500).json({ error: 'Azure Storage configuration missing' });
                 }
 
-                const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+                // Use DefaultAzureCredential for RBAC support
+                const credential = new DefaultAzureCredential();
                 const blobServiceClient = new BlobServiceClient(
                     `https://${account}.blob.core.windows.net`,
-                    sharedKeyCredential
+                    credential
                 );
                 const containerClient = blobServiceClient.getContainerClient(containerName);
                 const blockBlobClient = containerClient.getBlockBlobClient(blobPath);
@@ -1863,21 +1864,21 @@ ORDER BY f.CreatedAt DESC;
 
             // Generate SAS URL for the blob
             const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-            const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
             const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
-            if (!account || !accountKey || !containerName) {
+            if (!account || !containerName) {
                 console.error('Azure Storage configuration missing');
                 return res.status(500).json({ error: 'Azure Storage configuration missing' });
             }
 
             const { BlobServiceClient } = require('@azure/storage-blob');
-            const { StorageSharedKeyCredential } = require('@azure/storage-blob');
+            const { DefaultAzureCredential } = require('@azure/identity');
 
-            const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+            // Use DefaultAzureCredential for RBAC support
+            const credential = new DefaultAzureCredential();
             const blobServiceClient = new BlobServiceClient(
                 `https://${account}.blob.core.windows.net`,
-                sharedKeyCredential
+                credential
             );
             const containerClient = blobServiceClient.getContainerClient(containerName);
             const blobClient = containerClient.getBlobClient(file.BlobPath);

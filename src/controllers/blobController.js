@@ -1,14 +1,15 @@
-const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const { DefaultAzureCredential } = require('@azure/identity');
 require('dotenv').config();
 
 const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
 const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
-const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+// Use DefaultAzureCredential for RBAC support
+const credential = new DefaultAzureCredential();
 const blobServiceClient = new BlobServiceClient(
     `https://${account}.blob.core.windows.net`,
-    sharedKeyCredential
+    credential
 );
 
 const containerClient = blobServiceClient.getContainerClient(containerName);

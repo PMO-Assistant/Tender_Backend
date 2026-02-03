@@ -1,11 +1,11 @@
 const { getConnectedPool } = require('../../config/database');
 const { uploadFile, downloadFile, deleteFile } = require('../../config/azureBlobService');
 const { BlobServiceClient } = require('@azure/storage-blob');
+const { DefaultAzureCredential } = require('@azure/identity');
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { StorageSharedKeyCredential } = require('@azure/storage-blob');
 
 // Helper function to ensure notification table exists
 async function ensureNotificationTable(pool) {
@@ -765,18 +765,18 @@ async function generateSASUrl(req, res) {
 
         // Generate SAS URL for the blob
         const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-        const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
         const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
-        if (!account || !accountKey || !containerName) {
-            console.error('Azure Storage configuration missing:', { account, accountKey: accountKey ? 'SET' : 'MISSING', containerName });
+        if (!account || !containerName) {
+            console.error('Azure Storage configuration missing:', { account, containerName });
             return res.status(500).json({ error: 'Azure Storage configuration missing' });
         }
 
-        const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+        // Use DefaultAzureCredential for RBAC support
+        const credential = new DefaultAzureCredential();
         const blobServiceClient = new BlobServiceClient(
             `https://${account}.blob.core.windows.net`,
-            sharedKeyCredential
+            credential
         );
         const containerClient = blobServiceClient.getContainerClient(containerName);
         const blobClient = containerClient.getBlobClient(attachment.FileName);

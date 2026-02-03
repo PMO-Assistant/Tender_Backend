@@ -1,6 +1,7 @@
 const PptxGenJS = require('pptxgenjs');
 const { getConnectedPool } = require('../../config/database');
 const { BlobServiceClient } = require('@azure/storage-blob');
+const { DefaultAzureCredential } = require('@azure/identity');
 
 // ADCO brand colors
 const ADCO_COLORS = {
@@ -271,8 +272,15 @@ async function exportPowerPoint(req, res) {
     // If tenderId is provided, save to blob storage and database
     if (tenderId) {
       try {
-        const blobServiceClient = BlobServiceClient.fromConnectionString(
-          process.env.AZURE_STORAGE_CONNECTION_STRING
+        // Use DefaultAzureCredential for RBAC support
+        const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+        if (!account) {
+          throw new Error('AZURE_STORAGE_ACCOUNT_NAME is not configured');
+        }
+        const credential = new DefaultAzureCredential();
+        const blobServiceClient = new BlobServiceClient(
+          `https://${account}.blob.core.windows.net`,
+          credential
         );
         const containerClient = blobServiceClient.getContainerClient('tender-files');
         
@@ -415,8 +423,18 @@ async function loadPresentation(req, res) {
     const file = fileResult.recordset[0];
 
     // Download from blob storage
-    const blobServiceClient = BlobServiceClient.fromConnectionString(
-      process.env.AZURE_STORAGE_CONNECTION_STRING
+    // Use DefaultAzureCredential for RBAC support
+    const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+    if (!account) {
+      return res.status(500).json({
+        success: false,
+        error: 'AZURE_STORAGE_ACCOUNT_NAME is not configured'
+      });
+    }
+    const credential = new DefaultAzureCredential();
+    const blobServiceClient = new BlobServiceClient(
+      `https://${account}.blob.core.windows.net`,
+      credential
     );
     const containerClient = blobServiceClient.getContainerClient('tender-files');
     const blockBlobClient = containerClient.getBlockBlobClient(file.BlobPath);
