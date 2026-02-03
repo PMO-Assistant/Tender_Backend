@@ -272,16 +272,30 @@ async function exportPowerPoint(req, res) {
     // If tenderId is provided, save to blob storage and database
     if (tenderId) {
       try {
-        // Use DefaultAzureCredential for RBAC support
+        // Use account key by default (works on Heroku), use RBAC only if explicitly enabled
         const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+        const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
         if (!account) {
           throw new Error('AZURE_STORAGE_ACCOUNT_NAME is not configured');
         }
-        const credential = new DefaultAzureCredential();
-        const blobServiceClient = new BlobServiceClient(
-          `https://${account}.blob.core.windows.net`,
-          credential
-        );
+        const { StorageSharedKeyCredential } = require('@azure/storage-blob');
+        let blobServiceClient;
+        if (process.env.AZURE_USE_RBAC === 'true' && !accountKey) {
+          const credential = new DefaultAzureCredential();
+          blobServiceClient = new BlobServiceClient(
+            `https://${account}.blob.core.windows.net`,
+            credential
+          );
+        } else {
+          if (!accountKey) {
+            throw new Error('AZURE_STORAGE_ACCOUNT_KEY is required when AZURE_USE_RBAC is not enabled');
+          }
+          const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+          blobServiceClient = new BlobServiceClient(
+            `https://${account}.blob.core.windows.net`,
+            sharedKeyCredential
+          );
+        }
         const containerClient = blobServiceClient.getContainerClient('tender-files');
         
         // Ensure container exists
@@ -423,19 +437,36 @@ async function loadPresentation(req, res) {
     const file = fileResult.recordset[0];
 
     // Download from blob storage
-    // Use DefaultAzureCredential for RBAC support
+    // Use account key by default (works on Heroku), use RBAC only if explicitly enabled
     const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+    const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
     if (!account) {
       return res.status(500).json({
         success: false,
         error: 'AZURE_STORAGE_ACCOUNT_NAME is not configured'
       });
     }
-    const credential = new DefaultAzureCredential();
-    const blobServiceClient = new BlobServiceClient(
-      `https://${account}.blob.core.windows.net`,
-      credential
-    );
+    const { StorageSharedKeyCredential } = require('@azure/storage-blob');
+    let blobServiceClient;
+    if (process.env.AZURE_USE_RBAC === 'true' && !accountKey) {
+      const credential = new DefaultAzureCredential();
+      blobServiceClient = new BlobServiceClient(
+        `https://${account}.blob.core.windows.net`,
+        credential
+      );
+    } else {
+      if (!accountKey) {
+        return res.status(500).json({
+          success: false,
+          error: 'AZURE_STORAGE_ACCOUNT_KEY is required when AZURE_USE_RBAC is not enabled'
+        });
+      }
+      const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+      blobServiceClient = new BlobServiceClient(
+        `https://${account}.blob.core.windows.net`,
+        sharedKeyCredential
+      );
+    }
     const containerClient = blobServiceClient.getContainerClient('tender-files');
     const blockBlobClient = containerClient.getBlockBlobClient(file.BlobPath);
 

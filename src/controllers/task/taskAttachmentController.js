@@ -1,6 +1,6 @@
 const { getConnectedPool } = require('../../config/database');
 const { uploadFile, downloadFile, deleteFile } = require('../../config/azureBlobService');
-const { BlobServiceClient } = require('@azure/storage-blob');
+const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
 const { DefaultAzureCredential } = require('@azure/identity');
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
@@ -765,6 +765,7 @@ async function generateSASUrl(req, res) {
 
         // Generate SAS URL for the blob
         const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+        const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
         const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
         if (!account || !containerName) {
@@ -772,12 +773,24 @@ async function generateSASUrl(req, res) {
             return res.status(500).json({ error: 'Azure Storage configuration missing' });
         }
 
-        // Use DefaultAzureCredential for RBAC support
-        const credential = new DefaultAzureCredential();
-        const blobServiceClient = new BlobServiceClient(
-            `https://${account}.blob.core.windows.net`,
-            credential
-        );
+        // Use account key by default (works on Heroku), use RBAC only if explicitly enabled
+        let blobServiceClient;
+        if (process.env.AZURE_USE_RBAC === 'true' && !accountKey) {
+            const credential = new DefaultAzureCredential();
+            blobServiceClient = new BlobServiceClient(
+                `https://${account}.blob.core.windows.net`,
+                credential
+            );
+        } else {
+            if (!accountKey) {
+                return res.status(500).json({ error: 'AZURE_STORAGE_ACCOUNT_KEY is required when AZURE_USE_RBAC is not enabled' });
+            }
+            const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+            blobServiceClient = new BlobServiceClient(
+                `https://${account}.blob.core.windows.net`,
+                sharedKeyCredential
+            );
+        }
         const containerClient = blobServiceClient.getContainerClient(containerName);
         const blobClient = containerClient.getBlobClient(attachment.FileName);
 

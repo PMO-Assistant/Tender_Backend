@@ -1,19 +1,39 @@
-const { BlobServiceClient } = require('@azure/storage-blob');
+const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
 const { DefaultAzureCredential } = require('@azure/identity');
 require('dotenv').config();
 
 const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
 const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
-// Use DefaultAzureCredential for RBAC support
-// This will use managed identity in Azure, or fall back to Azure CLI/service principal locally
-const credential = new DefaultAzureCredential();
-const blobServiceClient = new BlobServiceClient(
-    `https://${account}.blob.core.windows.net`,
-    credential
-);
+// Create blob service client with authentication
+// Use account key by default (works everywhere), use RBAC only if explicitly enabled
+let blobServiceClient;
+let containerClient;
 
-const containerClient = blobServiceClient.getContainerClient(containerName);
+if (process.env.AZURE_USE_RBAC === 'true' && !accountKey) {
+    // Use DefaultAzureCredential only if explicitly enabled and no account key available
+    // This works in Azure App Service with managed identity
+    console.log('🔐 Using DefaultAzureCredential for blob storage authentication (RBAC)');
+    const credential = new DefaultAzureCredential();
+    blobServiceClient = new BlobServiceClient(
+        `https://${account}.blob.core.windows.net`,
+        credential
+    );
+} else {
+    // Use account key (default - works on Heroku, local dev, and most environments)
+    if (!accountKey) {
+        throw new Error('AZURE_STORAGE_ACCOUNT_KEY is required when AZURE_USE_RBAC is not enabled');
+    }
+    console.log('🔐 Using StorageSharedKeyCredential for blob storage authentication');
+    const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+    blobServiceClient = new BlobServiceClient(
+        `https://${account}.blob.core.windows.net`,
+        sharedKeyCredential
+    );
+}
+
+containerClient = blobServiceClient.getContainerClient(containerName);
 
 // Upload file
 async function uploadFile(fileName, buffer, mimeType) {

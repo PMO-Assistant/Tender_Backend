@@ -1,16 +1,29 @@
-const { BlobServiceClient } = require('@azure/storage-blob');
+const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
 const { DefaultAzureCredential } = require('@azure/identity');
 require('dotenv').config();
 
 const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
 const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
-// Use DefaultAzureCredential for RBAC support
-const credential = new DefaultAzureCredential();
-const blobServiceClient = new BlobServiceClient(
-    `https://${account}.blob.core.windows.net`,
-    credential
-);
+// Use account key by default (works on Heroku), use RBAC only if explicitly enabled
+let blobServiceClient;
+if (process.env.AZURE_USE_RBAC === 'true' && !accountKey) {
+    const credential = new DefaultAzureCredential();
+    blobServiceClient = new BlobServiceClient(
+        `https://${account}.blob.core.windows.net`,
+        credential
+    );
+} else {
+    if (!accountKey) {
+        throw new Error('AZURE_STORAGE_ACCOUNT_KEY is required when AZURE_USE_RBAC is not enabled');
+    }
+    const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+    blobServiceClient = new BlobServiceClient(
+        `https://${account}.blob.core.windows.net`,
+        sharedKeyCredential
+    );
+}
 
 const containerClient = blobServiceClient.getContainerClient(containerName);
 

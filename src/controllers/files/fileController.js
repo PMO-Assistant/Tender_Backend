@@ -1299,10 +1299,11 @@ ORDER BY f.CreatedAt DESC;
 
             // Upload to Azure Blob Storage FIRST (before extraction, so file exists when we try to download it)
             try {
-                const { BlobServiceClient } = require('@azure/storage-blob');
+                const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
                 const { DefaultAzureCredential } = require('@azure/identity');
                 
                 const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+                const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
                 const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
                 if (!account || !containerName) {
@@ -1310,12 +1311,24 @@ ORDER BY f.CreatedAt DESC;
                     return res.status(500).json({ error: 'Azure Storage configuration missing' });
                 }
 
-                // Use DefaultAzureCredential for RBAC support
-                const credential = new DefaultAzureCredential();
-                const blobServiceClient = new BlobServiceClient(
-                    `https://${account}.blob.core.windows.net`,
-                    credential
-                );
+                // Use account key by default (works on Heroku), use RBAC only if explicitly enabled
+                let blobServiceClient;
+                if (process.env.AZURE_USE_RBAC === 'true' && !accountKey) {
+                    const credential = new DefaultAzureCredential();
+                    blobServiceClient = new BlobServiceClient(
+                        `https://${account}.blob.core.windows.net`,
+                        credential
+                    );
+                } else {
+                    if (!accountKey) {
+                        throw new Error('AZURE_STORAGE_ACCOUNT_KEY is required when AZURE_USE_RBAC is not enabled');
+                    }
+                    const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+                    blobServiceClient = new BlobServiceClient(
+                        `https://${account}.blob.core.windows.net`,
+                        sharedKeyCredential
+                    );
+                }
                 const containerClient = blobServiceClient.getContainerClient(containerName);
                 const blockBlobClient = containerClient.getBlockBlobClient(blobPath);
                 
@@ -1619,14 +1632,14 @@ ORDER BY f.CreatedAt DESC;
 
             const fileIdInt = parseInt(fileId);
 
-            // Get file info
+            // Get file info - allow any authenticated user to download (same as viewing files in folders)
+            // Authentication is already handled by the middleware, so we just check if file exists and isn't deleted
             const result = await pool.request()
                 .input('FileID', fileIdInt)
-                .input('UserID', userId)
                 .query(`
                     SELECT DisplayName, BlobPath, ContentType
                     FROM tenderFile
-                    WHERE FileID = @FileID AND AddBy = @UserID AND IsDeleted = 0
+                    WHERE FileID = @FileID AND IsDeleted = 0
                 `);
 
             if (result.recordset.length === 0) {
@@ -1871,15 +1884,27 @@ ORDER BY f.CreatedAt DESC;
                 return res.status(500).json({ error: 'Azure Storage configuration missing' });
             }
 
-            const { BlobServiceClient } = require('@azure/storage-blob');
+            const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
             const { DefaultAzureCredential } = require('@azure/identity');
 
-            // Use DefaultAzureCredential for RBAC support
-            const credential = new DefaultAzureCredential();
-            const blobServiceClient = new BlobServiceClient(
-                `https://${account}.blob.core.windows.net`,
-                credential
-            );
+            // Use account key by default (works on Heroku), use RBAC only if explicitly enabled
+            let blobServiceClient;
+            if (process.env.AZURE_USE_RBAC === 'true' && !accountKey) {
+                const credential = new DefaultAzureCredential();
+                blobServiceClient = new BlobServiceClient(
+                    `https://${account}.blob.core.windows.net`,
+                    credential
+                );
+            } else {
+                if (!accountKey) {
+                    throw new Error('AZURE_STORAGE_ACCOUNT_KEY is required when AZURE_USE_RBAC is not enabled');
+                }
+                const sharedKeyCredential = new StorageSharedKeyCredential(account, accountKey);
+                blobServiceClient = new BlobServiceClient(
+                    `https://${account}.blob.core.windows.net`,
+                    sharedKeyCredential
+                );
+            }
             const containerClient = blobServiceClient.getContainerClient(containerName);
             const blobClient = containerClient.getBlobClient(file.BlobPath);
 
