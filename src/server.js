@@ -7,6 +7,12 @@ require('dotenv').config();
 
 console.log('🔧 Starting server...');
 
+// When running behind a proxy/load balancer (e.g. Heroku), trust the proxy so
+// middleware like express-rate-limit can correctly use X-Forwarded-* headers.
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
+
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
