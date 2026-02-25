@@ -177,6 +177,31 @@ const tenderContactController = {
         }
     },
 
+    // Report: all contact-tender assignments with full details
+    getContactReport: async (req, res) => {
+        try {
+            const pool = await getConnectedPool();
+            const result = await pool.request().query(`
+                SELECT
+                    ttc.id, ttc.role, ttc.participationNote,
+                    c.ContactID, c.FullName, c.Email, c.Phone,
+                    comp.CompanyName, comp.CompanyID,
+                    t.TenderID, t.ProjectName, t.Value, t.Status, t.Type,
+                    t.OpenDate, t.ReturnDate, t.CreatedAt
+                FROM tenderTenderContact ttc
+                INNER JOIN tenderContact c ON ttc.contactId = c.ContactID
+                LEFT JOIN tenderCompany comp ON c.CompanyID = comp.CompanyID
+                INNER JOIN tenderTender t ON ttc.tenderId = t.TenderID
+                WHERE t.IsDeleted = 0 AND (c.IsDeleted = 0 OR c.IsDeleted IS NULL)
+                ORDER BY c.FullName, t.CreatedAt DESC
+            `);
+            res.json(result.recordset);
+        } catch (err) {
+            console.error('Error fetching contact report:', err);
+            res.status(500).json({ error: 'Failed to fetch contact report data' });
+        }
+    },
+
     // Get all tenders where a contact is assigned as key contact
     getTendersByContact: async (req, res) => {
         try {

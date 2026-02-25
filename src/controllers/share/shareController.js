@@ -37,7 +37,7 @@ function calculateExpiration(duration) {
  */
 async function createShareLink(req, res) {
   try {
-    const { tenderId, packageId, packageName, duration, permissionLevel, description } = req.body;
+    const { tenderId, packageId, packageName, duration, permissionLevel, description, folderId, folderName } = req.body;
     const userId = req.user?.UserID;
 
     if (!userId) {
@@ -115,7 +115,7 @@ async function createShareLink(req, res) {
         `);
 
       const shareLink = result.recordset[0];
-      const shareUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/share/${shareToken}`;
+      const shareUrl = `${(process.env.FRONTEND_URL || process.env.FRONTEND_URI || 'http://localhost:3000').replace(/\/+$/, '')}/share/${shareToken}`;
 
       console.log(`[createShareLink] Created share link ${shareLink.ShareLinkID} for tender ${tenderId}, package ${packageId}`);
 
@@ -134,30 +134,43 @@ async function createShareLink(req, res) {
         }
       });
     } else {
-      // Share all drawings (no specific package)
       const shareToken = generateShareToken();
       const expiresAt = calculateExpiration(duration);
+
+      // Ensure FolderID / FolderName columns exist (idempotent)
+      try {
+        await pool.request().query(`
+          IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('tenderShareLink') AND name = 'FolderID')
+            ALTER TABLE tenderShareLink ADD FolderID INT NULL;
+          IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('tenderShareLink') AND name = 'FolderName')
+            ALTER TABLE tenderShareLink ADD FolderName NVARCHAR(500) NULL;
+        `);
+      } catch (migErr) {
+        console.warn('[createShareLink] Column migration warning:', migErr.message);
+      }
 
       const result = await pool.request()
         .input('ShareToken', shareToken)
         .input('TenderID', parseInt(tenderId))
         .input('PackageID', null)
         .input('PackageName', null)
+        .input('FolderID', folderId ? parseInt(folderId) : null)
+        .input('FolderName', folderName || null)
         .input('AddBy', userId)
         .input('ExpiresAt', expiresAt)
         .input('PermissionLevel', permissionLevel)
         .input('Description', description || null)
         .query(`
           INSERT INTO tenderShareLink 
-            (ShareToken, TenderID, PackageID, PackageName, AddBy, ExpiresAt, PermissionLevel, Description)
+            (ShareToken, TenderID, PackageID, PackageName, FolderID, FolderName, AddBy, ExpiresAt, PermissionLevel, Description)
           OUTPUT INSERTED.ShareLinkID, INSERTED.ShareToken, INSERTED.ExpiresAt, INSERTED.CreatedAt
-          VALUES (@ShareToken, @TenderID, @PackageID, @PackageName, @AddBy, @ExpiresAt, @PermissionLevel, @Description)
+          VALUES (@ShareToken, @TenderID, @PackageID, @PackageName, @FolderID, @FolderName, @AddBy, @ExpiresAt, @PermissionLevel, @Description)
         `);
 
       const shareLink = result.recordset[0];
-      const shareUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/share/${shareToken}`;
+      const shareUrl = `${(process.env.FRONTEND_URL || process.env.FRONTEND_URI || 'http://localhost:3000').replace(/\/+$/, '')}/share/${shareToken}`;
 
-      console.log(`[createShareLink] Created share link ${shareLink.ShareLinkID} for tender ${tenderId} (all packages)`);
+      console.log(`[createShareLink] Created share link ${shareLink.ShareLinkID} for tender ${tenderId}, folder ${folderId || 'all'}`);
 
       return res.json({
         success: true,
@@ -169,6 +182,8 @@ async function createShareLink(req, res) {
           createdAt: shareLink.CreatedAt,
           packageId: null,
           packageName: null,
+          folderId: folderId ? parseInt(folderId) : null,
+          folderName: folderName || null,
           permissionLevel,
           description
         }
@@ -237,7 +252,7 @@ async function getShareLinksByTender(req, res) {
     const shareLinks = result.recordset.map(link => ({
       id: link.ShareLinkID,
       token: link.ShareToken,
-      url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/share/${link.ShareToken}`,
+      url: `${(process.env.FRONTEND_URL || process.env.FRONTEND_URI || 'http://localhost:3000').replace(/\/+$/, '')}/share/${link.ShareToken}`,
       packageId: link.PackageID,
       packageName: link.PackageName,
       createdAt: link.CreatedAt,
@@ -319,26 +334,31 @@ async function getShareLinkByToken(req, res) {
     const { token } = req.params;
     const pool = await getConnectedPool();
 
-    const result = await pool.request()
-      .input('ShareToken', token)
-      .query(`
-        SELECT 
-          ShareLinkID,
-          ShareToken,
-          TenderID,
-          PackageID,
-          PackageName,
-          AddBy,
-          CreatedAt,
-          ExpiresAt,
-          PermissionLevel,
-          IsActive,
-          AccessCount,
-          LastAccessedAt,
-          Description
-        FROM tenderShareLink
-        WHERE ShareToken = @ShareToken
-      `);
+    let result;
+    try {
+      result = await pool.request()
+        .input('ShareToken', token)
+        .query(`
+          SELECT 
+            ShareLinkID, ShareToken, TenderID, PackageID, PackageName,
+            FolderID, FolderName,
+            AddBy, CreatedAt, ExpiresAt, PermissionLevel, IsActive,
+            AccessCount, LastAccessedAt, Description
+          FROM tenderShareLink
+          WHERE ShareToken = @ShareToken
+        `);
+    } catch (colErr) {
+      result = await pool.request()
+        .input('ShareToken', token)
+        .query(`
+          SELECT 
+            ShareLinkID, ShareToken, TenderID, PackageID, PackageName,
+            AddBy, CreatedAt, ExpiresAt, PermissionLevel, IsActive,
+            AccessCount, LastAccessedAt, Description
+          FROM tenderShareLink
+          WHERE ShareToken = @ShareToken
+        `);
+    }
 
     if (result.recordset.length === 0) {
       return res.status(404).json({ error: 'Share link not found' });
@@ -373,6 +393,8 @@ async function getShareLinkByToken(req, res) {
         tenderId: shareLink.TenderID,
         packageId: shareLink.PackageID,
         packageName: shareLink.PackageName,
+        folderId: shareLink.FolderID || null,
+        folderName: shareLink.FolderName || null,
         permissionLevel: shareLink.PermissionLevel,
         expiresAt: shareLink.ExpiresAt,
         description: shareLink.Description
@@ -393,14 +415,26 @@ async function getSharedDrawings(req, res) {
     const { token } = req.params;
     const pool = await getConnectedPool();
 
-    // Get share link details
-    const shareResult = await pool.request()
-      .input('ShareToken', token)
-      .query(`
-        SELECT TenderID, PackageID, ExpiresAt, IsActive
-        FROM tenderShareLink
-        WHERE ShareToken = @ShareToken
-      `);
+    // Get share link details (include FolderID if column exists)
+    let shareResult;
+    try {
+      shareResult = await pool.request()
+        .input('ShareToken', token)
+        .query(`
+          SELECT TenderID, PackageID, ExpiresAt, IsActive, FolderID
+          FROM tenderShareLink
+          WHERE ShareToken = @ShareToken
+        `);
+    } catch (colErr) {
+      // FolderID column may not exist yet
+      shareResult = await pool.request()
+        .input('ShareToken', token)
+        .query(`
+          SELECT TenderID, PackageID, ExpiresAt, IsActive
+          FROM tenderShareLink
+          WHERE ShareToken = @ShareToken
+        `);
+    }
 
     if (shareResult.recordset.length === 0) {
       return res.status(404).json({ error: 'Share link not found' });
@@ -408,59 +442,65 @@ async function getSharedDrawings(req, res) {
 
     const shareLink = shareResult.recordset[0];
 
-    // Check if expired
     if (new Date(shareLink.ExpiresAt) < new Date()) {
       return res.status(410).json({ error: 'Share link has expired' });
     }
 
-    // Check if active
     if (!shareLink.IsActive) {
       return res.status(403).json({ error: 'Share link has been deactivated' });
     }
 
-    // Get drawings for the tender and package (if specified)
-    let query = `
-      SELECT 
-        d.DrawingID,
-        d.DrawingNumber,
-        d.Title,
-        d.Description,
-        d.Discipline,
-        d.CurrentRevision,
-        d.CreatedDate,
-        f.FileID,
-        f.DisplayName as FileName,
-        f.ContentType,
-        f.Size,
-        f.UploadedOn
-      FROM tenderDrawing d
-      INNER JOIN tenderFile f ON d.FileID = f.FileID
-      WHERE d.TenderID = @TenderID
-        AND f.IsDeleted = 0
-    `;
+    // Build query — filter by folder (recursive) if FolderID is set
+    let query;
+    const request = pool.request().input('TenderID', shareLink.TenderID);
 
-    if (shareLink.PackageID) {
-      query += ` AND d.PackageID = @PackageID`;
-    }
+    if (shareLink.FolderID) {
+      // Use CTE to get all files in the folder and its subfolders, then join to drawings
+      request.input('RootFolderID', shareLink.FolderID);
+      query = `
+        ;WITH FolderTree AS (
+          SELECT FolderID FROM tenderFolder WHERE FolderID = @RootFolderID AND IsActive = 1
+          UNION ALL
+          SELECT c.FolderID FROM tenderFolder c INNER JOIN FolderTree ft ON c.ParentFolderID = ft.FolderID WHERE c.IsActive = 1
+        )
+        SELECT 
+          d.DrawingID, d.DrawingNumber, d.Title, d.Description, d.Discipline,
+          d.CurrentRevision, d.CreatedDate,
+          f.FileID, f.DisplayName as FileName, f.ContentType, f.Size, f.UploadedOn
+        FROM tenderFile f
+        INNER JOIN FolderTree ft ON f.FolderID = ft.FolderID
+        LEFT JOIN tenderDrawing d ON d.FileID = f.FileID AND d.TenderID = @TenderID
+        WHERE f.IsDeleted = 0
+        ORDER BY COALESCE(d.DrawingNumber, f.DisplayName), f.UploadedOn DESC
+      `;
+    } else {
+      query = `
+        SELECT 
+          d.DrawingID, d.DrawingNumber, d.Title, d.Description, d.Discipline,
+          d.CurrentRevision, d.CreatedDate,
+          f.FileID, f.DisplayName as FileName, f.ContentType, f.Size, f.UploadedOn
+        FROM tenderDrawing d
+        INNER JOIN tenderFile f ON d.FileID = f.FileID
+        WHERE d.TenderID = @TenderID AND f.IsDeleted = 0
+      `;
 
-    query += ` ORDER BY d.DrawingNumber, d.CreatedDate DESC`;
+      if (shareLink.PackageID) {
+        query += ` AND d.PackageID = @PackageID`;
+        request.input('PackageID', shareLink.PackageID);
+      }
 
-    const request = pool.request()
-      .input('TenderID', shareLink.TenderID);
-
-    if (shareLink.PackageID) {
-      request.input('PackageID', shareLink.PackageID);
+      query += ` ORDER BY d.DrawingNumber, d.CreatedDate DESC`;
     }
 
     const drawingsResult = await request.query(query);
 
     const drawings = drawingsResult.recordset.map(d => ({
-      drawingId: d.DrawingID,
-      drawingNumber: d.DrawingNumber,
-      title: d.Title,
-      description: d.Description,
-      discipline: d.Discipline,
-      currentRevision: d.CurrentRevision,
+      drawingId: d.DrawingID || null,
+      drawingNumber: d.DrawingNumber || null,
+      title: d.Title || d.FileName || null,
+      description: d.Description || null,
+      discipline: d.Discipline || null,
+      currentRevision: d.CurrentRevision || null,
       fileId: d.FileID,
       fileName: d.FileName,
       contentType: d.ContentType,
@@ -479,6 +519,65 @@ async function getSharedDrawings(req, res) {
 }
 
 /**
+ * Resolve a share link and verify a file belongs to it.
+ * Returns { shareLink, file } or sends an error response.
+ */
+async function resolveShareFile(pool, token, fileId, res, requireDownload = false) {
+  let shareResult;
+  try {
+    shareResult = await pool.request()
+      .input('ShareToken', token)
+      .query(`SELECT TenderID, PackageID, FolderID, ExpiresAt, IsActive, PermissionLevel FROM tenderShareLink WHERE ShareToken = @ShareToken`);
+  } catch (_) {
+    shareResult = await pool.request()
+      .input('ShareToken', token)
+      .query(`SELECT TenderID, PackageID, ExpiresAt, IsActive, PermissionLevel FROM tenderShareLink WHERE ShareToken = @ShareToken`);
+  }
+
+  if (shareResult.recordset.length === 0) { res.status(404).json({ error: 'Share link not found' }); return null; }
+  const shareLink = shareResult.recordset[0];
+
+  if (new Date(shareLink.ExpiresAt) < new Date()) { res.status(410).json({ error: 'Share link has expired' }); return null; }
+  if (!shareLink.IsActive) { res.status(403).json({ error: 'Share link has been deactivated' }); return null; }
+  if (requireDownload && shareLink.PermissionLevel !== 'download') { res.status(403).json({ error: 'Download not allowed for this share link' }); return null; }
+
+  const request = pool.request().input('FileID', parseInt(fileId));
+
+  let fileQuery;
+  if (shareLink.FolderID) {
+    request.input('RootFolderID', shareLink.FolderID);
+    fileQuery = `
+      ;WITH FolderTree AS (
+        SELECT FolderID FROM tenderFolder WHERE FolderID = @RootFolderID AND IsActive = 1
+        UNION ALL
+        SELECT c.FolderID FROM tenderFolder c INNER JOIN FolderTree ft ON c.ParentFolderID = ft.FolderID WHERE c.IsActive = 1
+      )
+      SELECT f.FileID, f.DisplayName, f.BlobPath, f.ContentType
+      FROM tenderFile f
+      INNER JOIN FolderTree ft ON f.FolderID = ft.FolderID
+      WHERE f.FileID = @FileID AND f.IsDeleted = 0
+    `;
+  } else {
+    request.input('TenderID', shareLink.TenderID);
+    fileQuery = `
+      SELECT f.FileID, f.DisplayName, f.BlobPath, f.ContentType
+      FROM tenderFile f
+      INNER JOIN tenderDrawing d ON f.FileID = d.FileID
+      WHERE f.FileID = @FileID AND d.TenderID = @TenderID AND f.IsDeleted = 0
+    `;
+    if (shareLink.PackageID) {
+      fileQuery += ` AND d.PackageID = @PackageID`;
+      request.input('PackageID', shareLink.PackageID);
+    }
+  }
+
+  const fileResult = await request.query(fileQuery);
+  if (fileResult.recordset.length === 0) { res.status(404).json({ error: 'File not found or not accessible through this share link' }); return null; }
+
+  return { shareLink, file: fileResult.recordset[0] };
+}
+
+/**
  * Download a file from a share link
  * GET /api/share/access/:token/download/:fileId
  */
@@ -487,65 +586,9 @@ async function downloadSharedFile(req, res) {
     const { token, fileId } = req.params;
     const pool = await getConnectedPool();
 
-    // Get share link details
-    const shareResult = await pool.request()
-      .input('ShareToken', token)
-      .query(`
-        SELECT TenderID, PackageID, ExpiresAt, IsActive, PermissionLevel
-        FROM tenderShareLink
-        WHERE ShareToken = @ShareToken
-      `);
-
-    if (shareResult.recordset.length === 0) {
-      return res.status(404).json({ error: 'Share link not found' });
-    }
-
-    const shareLink = shareResult.recordset[0];
-
-    // Check if expired
-    if (new Date(shareLink.ExpiresAt) < new Date()) {
-      return res.status(410).json({ error: 'Share link has expired' });
-    }
-
-    // Check if active
-    if (!shareLink.IsActive) {
-      return res.status(403).json({ error: 'Share link has been deactivated' });
-    }
-
-    // Check permission level
-    if (shareLink.PermissionLevel !== 'download') {
-      return res.status(403).json({ error: 'Download not allowed for this share link' });
-    }
-
-    // Verify file belongs to the shared tender and package (if specified)
-    let fileQuery = `
-      SELECT f.FileID, f.DisplayName, f.BlobPath, f.ContentType
-      FROM tenderFile f
-      INNER JOIN tenderDrawing d ON f.FileID = d.FileID
-      WHERE f.FileID = @FileID
-        AND d.TenderID = @TenderID
-        AND f.IsDeleted = 0
-    `;
-
-    if (shareLink.PackageID) {
-      fileQuery += ` AND d.PackageID = @PackageID`;
-    }
-
-    const request = pool.request()
-      .input('FileID', parseInt(fileId))
-      .input('TenderID', shareLink.TenderID);
-
-    if (shareLink.PackageID) {
-      request.input('PackageID', shareLink.PackageID);
-    }
-
-    const fileResult = await request.query(fileQuery);
-
-    if (fileResult.recordset.length === 0) {
-      return res.status(404).json({ error: 'File not found or not accessible through this share link' });
-    }
-
-    const file = fileResult.recordset[0];
+    const resolved = await resolveShareFile(pool, token, fileId, res, true);
+    if (!resolved) return;
+    const { file } = resolved;
 
     // Download from Azure Blob Storage
     const stream = await downloadFile(file.BlobPath);
@@ -579,60 +622,9 @@ async function getSharedFileViewUrl(req, res) {
     const { token, fileId } = req.params;
     const pool = await getConnectedPool();
 
-    // Get share link details
-    const shareResult = await pool.request()
-      .input('ShareToken', token)
-      .query(`
-        SELECT TenderID, PackageID, ExpiresAt, IsActive, PermissionLevel
-        FROM tenderShareLink
-        WHERE ShareToken = @ShareToken
-      `);
-
-    if (shareResult.recordset.length === 0) {
-      return res.status(404).json({ error: 'Share link not found' });
-    }
-
-    const shareLink = shareResult.recordset[0];
-
-    // Check if expired
-    if (new Date(shareLink.ExpiresAt) < new Date()) {
-      return res.status(410).json({ error: 'Share link has expired' });
-    }
-
-    // Check if active
-    if (!shareLink.IsActive) {
-      return res.status(403).json({ error: 'Share link has been deactivated' });
-    }
-
-    // Verify file belongs to the shared tender and package (if specified)
-    let fileQuery = `
-      SELECT f.FileID, f.DisplayName, f.BlobPath, f.ContentType
-      FROM tenderFile f
-      INNER JOIN tenderDrawing d ON f.FileID = d.FileID
-      WHERE f.FileID = @FileID
-        AND d.TenderID = @TenderID
-        AND f.IsDeleted = 0
-    `;
-
-    if (shareLink.PackageID) {
-      fileQuery += ` AND d.PackageID = @PackageID`;
-    }
-
-    const request = pool.request()
-      .input('FileID', parseInt(fileId))
-      .input('TenderID', shareLink.TenderID);
-
-    if (shareLink.PackageID) {
-      request.input('PackageID', shareLink.PackageID);
-    }
-
-    const fileResult = await request.query(fileQuery);
-
-    if (fileResult.recordset.length === 0) {
-      return res.status(404).json({ error: 'File not found or not accessible through this share link' });
-    }
-
-    const file = fileResult.recordset[0];
+    const resolved = await resolveShareFile(pool, token, fileId, res);
+    if (!resolved) return;
+    const { file } = resolved;
 
     // Generate SAS URL (read-only, expires in 1 hour)
     try {
@@ -707,60 +699,9 @@ async function streamSharedFile(req, res) {
     const { token, fileId } = req.params;
     const pool = await getConnectedPool();
 
-    // Get share link details
-    const shareResult = await pool.request()
-      .input('ShareToken', token)
-      .query(`
-        SELECT TenderID, PackageID, ExpiresAt, IsActive, PermissionLevel
-        FROM tenderShareLink
-        WHERE ShareToken = @ShareToken
-      `);
-
-    if (shareResult.recordset.length === 0) {
-      return res.status(404).json({ error: 'Share link not found' });
-    }
-
-    const shareLink = shareResult.recordset[0];
-
-    // Check if expired
-    if (new Date(shareLink.ExpiresAt) < new Date()) {
-      return res.status(410).json({ error: 'Share link has expired' });
-    }
-
-    // Check if active
-    if (!shareLink.IsActive) {
-      return res.status(403).json({ error: 'Share link has been deactivated' });
-    }
-
-    // Verify file belongs to the shared tender and package (if specified)
-    let fileQuery = `
-      SELECT f.FileID, f.DisplayName, f.BlobPath, f.ContentType
-      FROM tenderFile f
-      INNER JOIN tenderDrawing d ON f.FileID = d.FileID
-      WHERE f.FileID = @FileID
-        AND d.TenderID = @TenderID
-        AND f.IsDeleted = 0
-    `;
-
-    if (shareLink.PackageID) {
-      fileQuery += ` AND d.PackageID = @PackageID`;
-    }
-
-    const request = pool.request()
-      .input('FileID', parseInt(fileId))
-      .input('TenderID', shareLink.TenderID);
-
-    if (shareLink.PackageID) {
-      request.input('PackageID', shareLink.PackageID);
-    }
-
-    const fileResult = await request.query(fileQuery);
-
-    if (fileResult.recordset.length === 0) {
-      return res.status(404).json({ error: 'File not found or not accessible through this share link' });
-    }
-
-    const file = fileResult.recordset[0];
+    const resolved = await resolveShareFile(pool, token, fileId, res);
+    if (!resolved) return;
+    const { file } = resolved;
 
     // Stream file directly from Azure Blob Storage
     const stream = await downloadFile(file.BlobPath);

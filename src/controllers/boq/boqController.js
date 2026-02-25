@@ -93,6 +93,70 @@ async function overwriteExistingFile(fileId, blobPath, buffer, contentType) {
   return { fileId, blobPath, contentType: mimeType };
 }
 
+// Resolve the target folder for split BOQ outputs:
+// "04. BOQ Trade Packages" under the tender folder.
+async function resolveBoqTradePackagesFolderId(pool, tenderId, userId) {
+  // 1) Try to find existing folder directly
+  const existing = await pool.request()
+    .input('TenderID', parseInt(tenderId))
+    .query(`
+      SELECT TOP 1 FolderID
+      FROM tenderFolder
+      WHERE DocID = @TenderID
+        AND ConnectionTable = 'tenderTender'
+        AND FolderName = '04. BOQ Trade Packages'
+      ORDER BY FolderID ASC
+    `);
+  if (existing.recordset.length > 0) return existing.recordset[0].FolderID;
+
+  // 2) Find tender parent folder (direct child of root Tender folder ID 2)
+  const tenderParent = await pool.request()
+    .input('TenderID', parseInt(tenderId))
+    .query(`
+      SELECT TOP 1 FolderID, FolderPath
+      FROM tenderFolder
+      WHERE DocID = @TenderID
+        AND ConnectionTable = 'tenderTender'
+        AND ParentFolderID = 2
+      ORDER BY FolderID ASC
+    `);
+  if (tenderParent.recordset.length === 0) return null;
+
+  // 3) Create the trade packages folder if missing
+  const parentFolderId = tenderParent.recordset[0].FolderID;
+  const parentPath = tenderParent.recordset[0].FolderPath || '';
+  const folderName = '04. BOQ Trade Packages';
+  const folderPath = `${parentPath}/${folderName}`;
+
+  const createResult = await pool.request()
+    .input('FolderName', folderName)
+    .input('FolderPath', folderPath)
+    .input('FolderType', 'sub')
+    .input('ParentFolderID', parentFolderId)
+    .input('AddBy', userId ? parseInt(userId) : null)
+    .input('DocID', parseInt(tenderId))
+    .input('ConnectionTable', 'tenderTender')
+    .query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM tenderFolder
+        WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+      )
+      BEGIN
+        INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
+        OUTPUT INSERTED.FolderID
+        VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+      END
+      ELSE
+      BEGIN
+        SELECT TOP 1 FolderID
+        FROM tenderFolder
+        WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+      END
+    `);
+
+  return createResult.recordset[0]?.FolderID || null;
+}
+
 
 
 async function getBoqTextForFile(fileRow) {
@@ -2429,21 +2493,23 @@ const boqController = {
 
       // Upload generated files (overwrite existing by name in same folder; avoid duplicate rows)
       const uploadedFiles = [];
+      const userId = req.user?.UserID || null;
+      let targetFolderId = await resolveBoqTradePackagesFolderId(pool, tenderId, userId);
+      // Fallback to previous behavior if folder resolution fails
+      if (!targetFolderId) {
+        targetFolderId = fileRow.FolderID || null;
+        if (!targetFolderId) {
+          const rootRes = await pool.request()
+            .input('DocID', tenderId)
+            .query(`SELECT TOP 1 FolderID FROM tenderFolder WHERE DocID = @DocID ORDER BY FolderID ASC`);
+          targetFolderId = rootRes.recordset[0]?.FolderID || null;
+        }
+      }
+
       for (const splitFile of splitFiles) {
         try {
           const displayName = splitFile.fileName;
           const buffer = splitFile.buffer;
-
-          // Determine folder to place the split file (same as original or tender root)
-          let targetFolderId = fileRow.FolderID || null;
-          if (!targetFolderId) {
-            const rootRes = await pool.request()
-              .input('DocID', tenderId)
-              .query(`SELECT TOP 1 FolderID FROM tenderFolder WHERE DocID = @DocID ORDER BY FolderID ASC`);
-            targetFolderId = rootRes.recordset[0]?.FolderID || null;
-          }
-
-          const userId = req.user?.UserID || null;
 
           // Check if a file with this name already exists in the same folder (not deleted)
           const existingRes = await pool.request()

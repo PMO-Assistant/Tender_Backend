@@ -14,8 +14,14 @@ router.get('/test-db', fileController.testDatabase);
 // Test file upload
 router.post('/test-upload', upload.single('file'), fileController.testFileUpload);
 
+// Get child folders of a folder
+router.get('/folders/:folderId/children', fileController.getChildFolders);
+
 // Get files by folder ID
 router.get('/folders/:folderId/files', fileController.getFilesByFolder);
+
+// Get ALL files recursively from a folder and all its subfolders
+router.get('/folders/:folderId/files-recursive', fileController.getFilesRecursive);
 
 // Ensure task folder exists (check and create if needed)
 router.post('/ensure-task-folder', fileController.ensureTaskFolder);
@@ -58,6 +64,9 @@ router.get('/:fileId/pdf', fileController.convertWordToPdf);
 
 // Update file name
 router.put('/:fileId/name', fileController.updateFileName);
+
+// Move file to a different folder
+router.put('/:fileId/folder', fileController.moveFileToFolder);
 
 // Generate SAS URL for file viewing (for Excel files)
 router.get('/:fileId/sas-url', fileController.generateFileSASUrl);

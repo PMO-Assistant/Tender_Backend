@@ -804,7 +804,8 @@ const taskController = {
         DueDate,
         Priority,
         Tender,
-        WhatchlistID
+        WhatchlistID,
+        BD
       } = req.body;
 
       // Validate required fields

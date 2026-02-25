@@ -1,6 +1,38 @@
 const { getConnectedPool } = require('../../config/database');
 
 const supplyoController = {
+	// Get ALL Supplyo contacts (batch endpoint - single query for all contacts)
+	getAllContacts: async (req, res) => {
+		try {
+			const pool = await getConnectedPool();
+			const result = await pool.request()
+				.query(`
+					SELECT 
+						cont.ContactID,
+						cont.CompanyID,
+						cont.AddBy,
+						cont.FullName,
+						cont.Phone,
+						cont.Email,
+						cont.CreatedAt,
+						cont.UpdatedAt,
+						cont.Role,
+						cont.ScanResult,
+						c.CompanyName,
+						c.PrimaryService
+					FROM tenderSupplyoContact cont
+					INNER JOIN tenderSupplyo c ON cont.CompanyID = c.CompanyID
+					WHERE cont.Email IS NOT NULL AND cont.Email != ''
+					ORDER BY cont.FullName
+				`);
+			console.log(`📊 Fetched ${result.recordset.length} Supplyo contacts in single query`);
+			res.json(result.recordset);
+		} catch (err) {
+			console.error('Error fetching all Supplyo contacts:', err);
+			res.status(500).json({ message: err.message });
+		}
+	},
+
 	// Get all Supplyo companies
 	getAllCompanies: async (req, res) => {
 		try {

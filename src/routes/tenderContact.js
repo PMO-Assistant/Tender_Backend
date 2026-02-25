@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const tenderContactController = require('../controllers/tender/tenderContactController');
 
+// Contact report — all assignments with full details
+router.get('/report', tenderContactController.getContactReport);
+
 // Get all tenders where a contact is assigned (must come before /:tenderId/contacts)
 router.get('/contact/:contactId', tenderContactController.getTendersByContact);
 

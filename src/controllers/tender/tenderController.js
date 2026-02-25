@@ -467,65 +467,98 @@ const tenderController = {
                     const connectionTable = 'tenderTender';
                     const addByUser = AddBy || req.user?.UserID || null;
 
-                    // 4.1) Create folder structure for the tender under FolderID 2 ("Tender")
-                    const existingFolder = await pool.request()
+                    // 4.1) Atomic check-and-create for the tender parent folder
+                    const folderResult = await pool.request()
+                        .input('FolderName', tenderFolderName)
+                        .input('FolderPath', tenderFolderPath)
+                        .input('FolderType', 'sub')
+                        .input('ParentFolderID', rootTenderFolderId)
+                        .input('AddBy', addByUser)
                         .input('DocID', newTenderId)
                         .input('ConnectionTable', connectionTable)
-                        .input('ParentFolderID', rootTenderFolderId)
                         .query(`
-                            SELECT TOP 1 FolderID
-                            FROM tenderFolder
-                            WHERE DocID = @DocID
-                              AND ConnectionTable = @ConnectionTable
-                              AND ParentFolderID = @ParentFolderID
+                            IF NOT EXISTS (
+                                SELECT 1 FROM tenderFolder
+                                WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID = @ParentFolderID
+                            )
+                            BEGIN
+                                INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                                OUTPUT INSERTED.FolderID
+                                VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                            END
+                            ELSE
+                            BEGIN
+                                SELECT TOP 1 FolderID FROM tenderFolder
+                                WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID = @ParentFolderID
+                            END
                         `);
+                    const tenderFolderId = folderResult.recordset[0].FolderID;
 
-                    let tenderFolderId;
-                    if (existingFolder.recordset.length > 0) {
-                        tenderFolderId = existingFolder.recordset[0].FolderID;
-                    } else {
-                        const insertTenderFolder = await pool.request()
-                            .input('FolderName', tenderFolderName)
-                            .input('FolderPath', tenderFolderPath)
+                    // Subfolders to create (numbered for ordering)
+                    const subfolders = [
+                        '01. Tender Issue',
+                        '02. Addendums & Clarifications & RFIs',
+                        '03. Site Photos',
+                        '04. BOQ Trade Packages',
+                        '05. Draft BOQ & Prelimns',
+                        '06. Quotes',
+                        '07. Programme',
+                        '08. Tender Submitted',
+                        '09. Post Tender Clarifications',
+                        '10. Final Contract Documents',
+                        '11. Brian & Steven Work in Progress'
+                    ];
+                    let tenderIssueFolderId = null;
+                    for (const sub of subfolders) {
+                        const subPath = `${tenderFolderPath}/${sub}`;
+                        const subResult = await pool.request()
+                            .input('FolderName', sub)
+                            .input('FolderPath', subPath)
                             .input('FolderType', 'sub')
-                            .input('ParentFolderID', rootTenderFolderId)
+                            .input('ParentFolderID', tenderFolderId)
                             .input('AddBy', addByUser)
                             .input('DocID', newTenderId)
                             .input('ConnectionTable', connectionTable)
                             .query(`
-                                INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                                OUTPUT INSERTED.FolderID
-                                VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                                IF NOT EXISTS (
+                                    SELECT 1 FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                                )
+                                BEGIN
+                                    INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
+                                    OUTPUT INSERTED.FolderID
+                                    VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+                                END
+                                ELSE
+                                BEGIN
+                                    SELECT TOP 1 FolderID FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                                END
                             `);
-                        tenderFolderId = insertTenderFolder.recordset[0].FolderID;
+                        if (sub === '01. Tender Issue' && subResult.recordset[0]) {
+                            tenderIssueFolderId = subResult.recordset[0].FolderID;
+                        }
                     }
 
-                    // Subfolders to create
-                    const subfolders = ['General', 'RFI', 'BOQ', 'SAQ'];
-                    for (const sub of subfolders) {
-                        // Check existence (by ParentFolderID + FolderName)
-                        const existsSub = await pool.request()
-                            .input('ParentFolderID', tenderFolderId)
-                            .input('FolderName', sub)
+                    // Create "Drawings" subfolder inside "01. Tender Issue"
+                    if (tenderIssueFolderId) {
+                        const drawingsPath = `${tenderFolderPath}/01. Tender Issue/Drawings`;
+                        await pool.request()
+                            .input('FolderName', 'Drawings')
+                            .input('FolderPath', drawingsPath)
+                            .input('FolderType', 'sub')
+                            .input('ParentFolderID', tenderIssueFolderId)
+                            .input('AddBy', addByUser)
+                            .input('DocID', newTenderId)
+                            .input('ConnectionTable', connectionTable)
                             .query(`
-                                SELECT TOP 1 FolderID FROM tenderFolder
-                                WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                                IF NOT EXISTS (
+                                    SELECT 1 FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                                )
+                                INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
+                                VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
                             `);
-                        if (existsSub.recordset.length === 0) {
-                            const subPath = `${tenderFolderPath}/${sub}`;
-                            await pool.request()
-                                .input('FolderName', sub)
-                                .input('FolderPath', subPath)
-                                .input('FolderType', 'sub')
-                                .input('ParentFolderID', tenderFolderId)
-                                .input('AddBy', addByUser)
-                                .input('DocID', newTenderId)
-                                .input('ConnectionTable', connectionTable)
-                                .query(`
-                                    INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                                    VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
-                                `);
-                        }
                     }
                 }
             } catch (folderErr) {

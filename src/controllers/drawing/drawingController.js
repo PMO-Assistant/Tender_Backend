@@ -1064,6 +1064,7 @@ async function getDrawingsByTenderId(req, res) {
           LEFT JOIN tenderEmployee e ON d.AddedBy = e.UserID
           LEFT JOIN tenderFile f ON d.FileID = f.FileID
           WHERE d.TenderID = @TenderID
+            AND (f.IsDeleted = 0 OR f.IsDeleted IS NULL OR d.FileID IS NULL)
           ORDER BY d.DrawingNumber, d.CreatedDate DESC
         `);
       

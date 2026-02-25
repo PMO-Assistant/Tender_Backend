@@ -4,6 +4,7 @@ const supplyoController = require('../controllers/supplyo/supplyoController');
 const supplyoTagController = require('../controllers/supplyo/supplyoTagController');
 
 router.get('/', supplyoController.getAllCompanies);
+router.get('/contacts/all', supplyoController.getAllContacts); // Batch endpoint - must be before /:id
 router.get('/:id', supplyoController.getCompanyById);
 router.get('/:id/contacts', supplyoController.getCompanyContacts);
 router.post('/', supplyoController.createCompany);

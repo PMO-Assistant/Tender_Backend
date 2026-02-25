@@ -108,6 +108,35 @@ const fileController = {
         }
     },
 
+    // Get child folders of a given folder
+    getChildFolders: async (req, res) => {
+        try {
+            const { folderId } = req.params;
+            const pool = await getConnectedPool();
+
+            const result = await pool.request()
+                .input('ParentFolderID', folderId)
+                .query(`
+                    SELECT FolderID, FolderName, FolderPath, ParentFolderID, DocID, ConnectionTable
+                    FROM tenderFolder
+                    WHERE ParentFolderID = @ParentFolderID AND IsActive = 1
+                    ORDER BY FolderName
+                `);
+
+            res.json({ folders: result.recordset.map(f => ({
+                id: f.FolderID,
+                name: f.FolderName,
+                path: f.FolderPath,
+                parentId: f.ParentFolderID,
+                docId: f.DocID,
+                connectionTable: f.ConnectionTable
+            })) });
+        } catch (error) {
+            console.error('Error getting child folders:', error);
+            res.status(500).json({ message: 'Failed to get child folders' });
+        }
+    },
+
     // Get files by folder ID
     getFilesByFolder: async (req, res) => {
         try {
@@ -167,6 +196,105 @@ const fileController = {
         } catch (error) {
             console.error('Error getting files by folder:', error);
             res.status(500).json({ message: 'Failed to get files' });
+        }
+    },
+
+    // Get ALL files recursively from a folder and all its subfolders (any depth)
+    getFilesRecursive: async (req, res) => {
+        try {
+            const { folderId } = req.params;
+            const pool = await getConnectedPool();
+            const userId = req.user.UserID;
+
+            // Use a CTE to walk the folder tree starting from folderId (only active subfolders)
+            const result = await pool.request()
+                .input('RootFolderID', parseInt(folderId))
+                .input('UserID', userId)
+                .query(`
+                    ;WITH FolderTree AS (
+                        SELECT FolderID, FolderName, ParentFolderID, CAST('' AS NVARCHAR(MAX)) AS FolderLabel
+                        FROM tenderFolder
+                        WHERE FolderID = @RootFolderID
+                        UNION ALL
+                        SELECT c.FolderID, c.FolderName, c.ParentFolderID,
+                            CASE WHEN ft.FolderID = @RootFolderID THEN c.FolderName
+                                 ELSE CAST(ft.FolderLabel + ' / ' + c.FolderName AS NVARCHAR(MAX))
+                            END
+                        FROM tenderFolder c
+                        INNER JOIN FolderTree ft ON c.ParentFolderID = ft.FolderID
+                        WHERE c.IsActive = 1
+                    )
+                    SELECT
+                        f.FileID as id,
+                        f.DisplayName as name,
+                        f.ContentType as contentType,
+                        f.Size as size,
+                        f.UploadedOn as uploadedOn,
+                        f.CreatedAt as createdAt,
+                        f.FolderID as folderId,
+                        f.DocID as docId,
+                        f.Metadata as metadata,
+                        ft.FolderName as folderName,
+                        ft.FolderLabel as folderLabel,
+                        ft.FolderID as folderFolderId,
+                        u.Name as uploadedBy,
+                        CASE WHEN fv.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred
+                    FROM FolderTree ft
+                    INNER JOIN tenderFile f ON f.FolderID = ft.FolderID AND (f.IsDeleted = 0 OR f.IsDeleted IS NULL)
+                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                    LEFT JOIN tenderFileFav fv ON f.FileID = fv.FileID AND fv.UserID = @UserID
+                    ORDER BY ft.FolderLabel, f.DisplayName
+                `);
+
+            // Also get the list of subfolders (for showing empty ones)
+            const foldersResult = await pool.request()
+                .input('RootFolderID', parseInt(folderId))
+                .query(`
+                    ;WITH FolderTree AS (
+                        SELECT FolderID, FolderName, ParentFolderID, CAST('' AS NVARCHAR(MAX)) AS FolderLabel
+                        FROM tenderFolder
+                        WHERE FolderID = @RootFolderID
+                        UNION ALL
+                        SELECT c.FolderID, c.FolderName, c.ParentFolderID,
+                            CASE WHEN ft.FolderID = @RootFolderID THEN c.FolderName
+                                 ELSE CAST(ft.FolderLabel + ' / ' + c.FolderName AS NVARCHAR(MAX))
+                            END
+                        FROM tenderFolder c
+                        INNER JOIN FolderTree ft ON c.ParentFolderID = ft.FolderID
+                        WHERE c.IsActive = 1
+                    )
+                    SELECT FolderID, FolderName, FolderLabel
+                    FROM FolderTree
+                    WHERE FolderID != @RootFolderID
+                `);
+
+            const files = result.recordset.map(file => ({
+                id: file.id,
+                name: file.name,
+                type: getFileType(file.contentType, file.name),
+                contentType: file.contentType,
+                size: file.size,
+                uploadedOn: file.uploadedOn,
+                createdAt: file.createdAt,
+                folderId: file.folderId,
+                docId: file.docId,
+                folderName: file.folderName,
+                folderLabel: file.folderFolderId === parseInt(folderId) ? null : file.folderLabel,
+                metadata: file.metadata ? JSON.parse(file.metadata) : null,
+                uploadedBy: file.uploadedBy,
+                isStarred: file.isStarred === 1
+            }));
+
+            const subfolders = foldersResult.recordset.map(f => ({
+                id: f.FolderID,
+                name: f.FolderName,
+                label: f.FolderLabel
+            }));
+
+            res.json({ files, subfolders });
+        } catch (error) {
+            console.error('Error getting files recursively:', error);
+            res.status(500).json({ message: 'Failed to get files recursively' });
         }
     },
 
@@ -315,69 +443,108 @@ const fileController = {
             const tenderFolderName = `${tenderId} - ${safeProjectName}`;
             const tenderFolderPath = `/Tender/${tenderFolderName}`;
 
-            // Check if exists by DocID + ConnectionTable + Parent
-            const existingFolderResult = await pool.request()
+            // Atomic check-and-create for the tender parent folder
+            const folderResult = await pool.request()
+                .input('FolderName', tenderFolderName)
+                .input('FolderPath', tenderFolderPath)
+                .input('FolderType', 'sub')
+                .input('ParentFolderID', rootTenderFolderId)
+                .input('AddBy', userId)
                 .input('DocID', tenderId)
                 .input('ConnectionTable', 'tenderTender')
-                .input('ParentFolderID', rootTenderFolderId)
                 .query(`
-                    SELECT FolderID, FolderPath, FolderName
-                    FROM tenderFolder 
-                    WHERE DocID = @DocID 
-                      AND ConnectionTable = @ConnectionTable 
-                      AND ParentFolderID = @ParentFolderID
+                    IF NOT EXISTS (
+                        SELECT 1 FROM tenderFolder
+                        WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID = @ParentFolderID
+                    )
+                    BEGIN
+                        INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                        OUTPUT INSERTED.FolderID
+                        VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                    END
+                    ELSE
+                    BEGIN
+                        SELECT TOP 1 FolderID FROM tenderFolder
+                        WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID = @ParentFolderID
+                    END
                 `);
+            const tenderFolderId = folderResult.recordset[0].FolderID;
 
-            let tenderFolderId;
-            if (existingFolderResult.recordset.length > 0) {
-                tenderFolderId = existingFolderResult.recordset[0].FolderID;
-            } else {
-                const insertResult = await pool.request()
-                    .input('FolderName', tenderFolderName)
-                    .input('FolderPath', tenderFolderPath)
+            // Create all standard tender subfolders
+            const subNames = [
+                '01. Tender Issue',
+                '02. Addendums & Clarifications & RFIs',
+                '03. Site Photos',
+                '04. BOQ Trade Packages',
+                '05. Draft BOQ & Prelimns',
+                '06. Quotes',
+                '07. Programme',
+                '08. Tender Submitted',
+                '09. Post Tender Clarifications',
+                '10. Final Contract Documents',
+                '11. Brian & Steven Work in Progress'
+            ];
+            const subfolderIds = {};
+            for (const name of subNames) {
+                const subPath = `${tenderFolderPath}/${name}`;
+                const result = await pool.request()
+                    .input('FolderName', name)
+                    .input('FolderPath', subPath)
                     .input('FolderType', 'sub')
-                    .input('ParentFolderID', rootTenderFolderId)
+                    .input('ParentFolderID', tenderFolderId)
                     .input('AddBy', userId)
                     .input('DocID', tenderId)
                     .input('ConnectionTable', 'tenderTender')
                     .query(`
-                        INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                        OUTPUT INSERTED.FolderID
-                        VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                        IF NOT EXISTS (
+                            SELECT 1 FROM tenderFolder 
+                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                        )
+                        BEGIN
+                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
+                            OUTPUT INSERTED.FolderID
+                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+                        END
+                        ELSE
+                        BEGIN
+                            UPDATE tenderFolder SET IsActive = 1 WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName AND IsActive = 0;
+                            SELECT TOP 1 FolderID FROM tenderFolder
+                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                        END
                     `);
-                tenderFolderId = insertResult.recordset[0].FolderID;
+                subfolderIds[name] = result.recordset[0]?.FolderID;
             }
 
-            // Create all subfolders: General, RFI, BOQ, SAQ, and Drawings
-            const subNames = ['General', 'RFI', 'BOQ', 'SAQ', 'Drawings'];
-            const subfolderIds = {};
-            for (const name of subNames) {
-                const existsSub = await pool.request()
-                    .input('ParentFolderID', tenderFolderId)
-                    .input('FolderName', name)
+            // Create "Drawings" subfolder inside "01. Tender Issue"
+            const tenderIssueFolderId = subfolderIds['01. Tender Issue'];
+            if (tenderIssueFolderId) {
+                const drawingsPath = `${tenderFolderPath}/01. Tender Issue/Drawings`;
+                const drawingsResult = await pool.request()
+                    .input('FolderName', 'Drawings')
+                    .input('FolderPath', drawingsPath)
+                    .input('FolderType', 'sub')
+                    .input('ParentFolderID', tenderIssueFolderId)
+                    .input('AddBy', userId)
+                    .input('DocID', tenderId)
+                    .input('ConnectionTable', 'tenderTender')
                     .query(`
-                        SELECT TOP 1 FolderID FROM tenderFolder
-                        WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
-                    `);
-                if (existsSub.recordset.length > 0) {
-                    subfolderIds[name] = existsSub.recordset[0].FolderID;
-                } else {
-                    const subPath = `${tenderFolderPath}/${name}`;
-                    const insertedSub = await pool.request()
-                        .input('FolderName', name)
-                        .input('FolderPath', subPath)
-                        .input('FolderType', 'sub')
-                        .input('ParentFolderID', tenderFolderId)
-                        .input('AddBy', userId)
-                        .input('DocID', tenderId)
-                        .input('ConnectionTable', 'tenderTender')
-                        .query(`
-                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                        IF NOT EXISTS (
+                            SELECT 1 FROM tenderFolder
+                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                        )
+                        BEGIN
+                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
                             OUTPUT INSERTED.FolderID
-                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
-                        `);
-                    subfolderIds[name] = insertedSub.recordset[0].FolderID;
-                }
+                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+                        END
+                        ELSE
+                        BEGIN
+                            UPDATE tenderFolder SET IsActive = 1 WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName AND IsActive = 0;
+                            SELECT TOP 1 FolderID FROM tenderFolder
+                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                        END
+                    `);
+                subfolderIds['Drawings'] = drawingsResult.recordset[0]?.FolderID;
             }
 
             res.json({
@@ -408,6 +575,10 @@ const fileController = {
                 return res.status(400).json({ message: 'Folder name is required' });
             }
 
+            if (folderName.trim().toLowerCase() === 'drawings') {
+                return res.status(400).json({ message: 'Cannot create a folder named "Drawings" — this name is reserved.' });
+            }
+
             // Validate parent folder exists and is a tender folder
             const parentFolderResult = await pool.request()
                 .input('ParentFolderID', parentFolderId)
@@ -428,39 +599,50 @@ const fileController = {
                 return res.status(400).json({ message: 'Can only create subfolders in tender folders' });
             }
 
-            // Check if subfolder with same name already exists
+            // Check if subfolder with same name already exists (active or soft-deleted)
             const existingFolderResult = await pool.request()
                 .input('ParentFolderID', parentFolderId)
                 .input('FolderName', folderName.trim())
                 .query(`
-                    SELECT FolderID 
+                    SELECT FolderID, FolderName, FolderPath, IsActive
                     FROM tenderFolder 
-                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName AND IsActive = 1
+                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
                 `);
 
+            let newFolder;
             if (existingFolderResult.recordset.length > 0) {
-                return res.status(409).json({ message: 'A folder with this name already exists' });
+                const existing = existingFolderResult.recordset[0];
+                if (existing.IsActive) {
+                    return res.status(409).json({ 
+                        message: 'A folder with this name already exists',
+                        folder: { id: existing.FolderID, name: existing.FolderName, path: existing.FolderPath }
+                    });
+                }
+                // Reactivate soft-deleted folder
+                await pool.request()
+                    .input('FolderID', existing.FolderID)
+                    .query(`UPDATE tenderFolder SET IsActive = 1, UpdatedAt = GETDATE() WHERE FolderID = @FolderID`);
+                newFolder = { FolderID: existing.FolderID, FolderName: existing.FolderName, FolderPath: existing.FolderPath };
+            } else {
+                // Construct the new folder path
+                const newFolderPath = `${parentFolder.FolderPath}/${folderName.trim()}`;
+
+                // Create the subfolder
+                const insertResult = await pool.request()
+                    .input('FolderName', folderName.trim())
+                    .input('FolderPath', newFolderPath)
+                    .input('FolderType', 'sub')
+                    .input('ParentFolderID', parentFolderId)
+                    .input('AddBy', userId)
+                    .input('DocID', parentFolder.DocID)
+                    .input('ConnectionTable', parentFolder.ConnectionTable)
+                    .query(`
+                        INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
+                        OUTPUT INSERTED.FolderID, INSERTED.FolderPath, INSERTED.FolderName
+                        VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+                    `);
+                newFolder = insertResult.recordset[0];
             }
-
-            // Construct the new folder path
-            const newFolderPath = `${parentFolder.FolderPath}/${folderName.trim()}`;
-
-            // Create the subfolder
-            const insertResult = await pool.request()
-                .input('FolderName', folderName.trim())
-                .input('FolderPath', newFolderPath)
-                .input('FolderType', 'sub')
-                .input('ParentFolderID', parentFolderId)
-                .input('AddBy', userId)
-                .input('DocID', parentFolder.DocID)
-                .input('ConnectionTable', parentFolder.ConnectionTable)
-                .query(`
-                    INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                    OUTPUT INSERTED.FolderID, INSERTED.FolderPath, INSERTED.FolderName
-                    VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
-                `);
-
-            const newFolder = insertResult.recordset[0];
             
             res.status(201).json({
                 message: 'Subfolder created successfully',
@@ -480,18 +662,17 @@ const fileController = {
         }
     },
 
-    // Delete folder (only user-created folders). Deletes all files inside first; still blocks if subfolders exist
+    // Delete folder recursively — deletes all child subfolders and files inside
     deleteFolder: async (req, res) => {
         try {
             const { folderId } = req.params;
             const pool = await getConnectedPool();
             const userId = req.user.UserID;
 
-            // First, get folder details to check if it can be deleted
             const folderResult = await pool.request()
                 .input('FolderID', folderId)
                 .query(`
-                    SELECT FolderID, FolderName, FolderPath, FolderType, AddBy, DocID, ConnectionTable
+                    SELECT FolderID, FolderName, FolderPath, FolderType, AddBy, DocID, ConnectionTable, ParentFolderID
                     FROM tenderFolder 
                     WHERE FolderID = @FolderID AND IsActive = 1
                 `);
@@ -502,96 +683,84 @@ const fileController = {
 
             const folder = folderResult.recordset[0];
 
-            // Check if user owns this folder (only creator can delete)
-            if (folder.AddBy !== userId) {
-                return res.status(403).json({ message: 'You can only delete folders you created' });
-            }
-
-            // Check if this is a system folder (has DocID and ConnectionTable - these are tender/task folders)
-            // Only allow deletion of user-created subfolders (those without DocID/ConnectionTable or with different structure)
-            if (folder.DocID && folder.ConnectionTable) {
-                // This is a system-generated folder (tender/task folder), check if it's a subfolder
-                // Allow deletion only if it's a subfolder within a tender/task folder
-                const parentResult = await pool.request()
-                    .input('FolderID', folderId)
-                    .query(`
-                        SELECT ParentFolderID FROM tenderFolder WHERE FolderID = @FolderID
-                    `);
-                
-                if (parentResult.recordset.length === 0) {
-                    return res.status(400).json({ message: 'Cannot delete system folders' });
+            // Block deletion of the 11 standard tender subfolders (direct children of a tender root folder)
+            const protectedPattern = /^\d{2}\.\s/;
+            if (protectedPattern.test(folder.FolderName)) {
+                const parentCheck = await pool.request()
+                    .input('ParentID', folder.ParentFolderID)
+                    .query(`SELECT ParentFolderID FROM tenderFolder WHERE FolderID = @ParentID`);
+                const grandparentId = parentCheck.recordset[0]?.ParentFolderID;
+                if (grandparentId === 2) {
+                    return res.status(400).json({ 
+                        message: `Cannot delete system folder "${folder.FolderName}".` 
+                    });
                 }
             }
 
-            // Check if this is a protected system subfolder (BOQ, General, RFI, SAQ)
-            const protectedFolderNames = ['BOQ', 'General', 'RFI', 'SAQ'];
-            if (protectedFolderNames.includes(folder.FolderName)) {
-                return res.status(400).json({ 
-                    message: `Cannot delete system folder "${folder.FolderName}". This folder is required for tender organization.` 
-                });
-            }
+            // Recursive helper: collect all folder IDs in the subtree (depth-first)
+            const collectFolderIds = async (parentId) => {
+                const childResult = await pool.request()
+                    .input('PID', parentId)
+                    .query(`SELECT FolderID FROM tenderFolder WHERE ParentFolderID = @PID AND IsActive = 1`);
+                let ids = [];
+                for (const child of childResult.recordset) {
+                    const childIds = await collectFolderIds(child.FolderID);
+                    ids = ids.concat(childIds);
+                }
+                ids.push(parentId);
+                return ids;
+            };
 
-            // Load all files inside this folder for this user and delete them first
-            const filesInFolder = await pool.request()
-                .input('FolderID', folderId)
-                .input('UserID', userId)
-                .query(`
-                    SELECT FileID, BlobPath, DisplayName
-                    FROM tenderFile
-                    WHERE FolderID = @FolderID AND AddBy = @UserID AND IsDeleted = 0
-                `);
+            const allFolderIds = await collectFolderIds(parseInt(folderId));
 
             let deletedFiles = 0;
-            for (const f of filesInFolder.recordset) {
-                try {
-                    if (f.BlobPath) {
-                        const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
-                        await deleteBlobFile(f.BlobPath);
+            const allDeletedFileIds = [];
+
+            for (const fid of allFolderIds) {
+                const filesInFolder = await pool.request()
+                    .input('FolderID', fid)
+                    .query(`SELECT FileID, BlobPath FROM tenderFile WHERE FolderID = @FolderID AND IsDeleted = 0`);
+
+                for (const f of filesInFolder.recordset) {
+                    try {
+                        if (f.BlobPath) {
+                            const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
+                            await deleteBlobFile(f.BlobPath);
+                        }
+                    } catch (blobErr) {
+                        console.warn('Warning: Failed to delete blob during folder delete:', (blobErr && blobErr.message) || blobErr);
                     }
-                } catch (blobErr) {
-                    console.warn('Warning: Failed to delete file from blob storage during folder delete:', (blobErr && blobErr.message) || blobErr);
+                    await pool.request()
+                        .input('FileID', f.FileID)
+                        .query(`UPDATE tenderFile SET IsDeleted = 1 WHERE FileID = @FileID`);
+
+                    allDeletedFileIds.push(f.FileID);
+                    deletedFiles++;
                 }
 
                 await pool.request()
-                    .input('FileID', f.FileID)
-                    .input('UserID', userId)
-                    .query(`
-                        DELETE FROM tenderFile
-                        WHERE FileID = @FileID AND AddBy = @UserID
-                    `);
-                deletedFiles += 1;
+                    .input('FID', fid)
+                    .query(`UPDATE tenderFolder SET IsActive = 0, UpdatedAt = GETDATE() WHERE FolderID = @FID`);
             }
 
-            // Check if folder has any subfolders
-            const subfoldersResult = await pool.request()
-                .input('ParentFolderID', folderId)
-                .query(`
-                    SELECT COUNT(*) as SubfolderCount
-                    FROM tenderFolder 
-                    WHERE ParentFolderID = @ParentFolderID AND IsActive = 1
-                `);
-
-            const subfolderCount = subfoldersResult.recordset[0].SubfolderCount;
-            if (subfolderCount > 0) {
-                return res.status(400).json({ 
-                    message: `Cannot delete folder. It contains ${subfolderCount} subfolder(s). Please delete all subfolders first.` 
-                });
+            // Bulk-delete all tenderDrawing records for this tender's DocID
+            const docId = folder.DocID;
+            if (docId) {
+                try {
+                    const delResult = await pool.request()
+                        .input('TenderID', docId)
+                        .query(`DELETE FROM tenderDrawing WHERE TenderID = @TenderID`);
+                    console.log(`Deleted ${delResult.rowsAffected[0]} drawing records for TenderID ${docId}`);
+                } catch (drawingErr) {
+                    console.warn('Could not bulk-delete tenderDrawing by TenderID:', (drawingErr && drawingErr.message) || drawingErr);
+                }
             }
-
-            // Delete the folder (soft delete by setting IsActive = 0)
-            await pool.request()
-                .input('FolderID', folderId)
-                .input('UserID', userId)
-                .query(`
-                    UPDATE tenderFolder 
-                    SET IsActive = 0, UpdatedAt = GETDATE()
-                    WHERE FolderID = @FolderID AND AddBy = @UserID
-                `);
 
             res.json({
                 message: 'Folder deleted successfully',
                 folderName: folder.FolderName,
-                deletedFiles
+                deletedFiles,
+                deletedFolders: allFolderIds.length
             });
 
         } catch (error) {
@@ -1351,33 +1520,29 @@ ORDER BY f.CreatedAt DESC;
             // If uploaded into Tender > Drawings folder, automatically extract and create tenderDrawing record
             try {
                 if (connectionTable === 'tenderTender' && docId && folderId) {
-                    // Check if the file was uploaded to a Drawings folder
-                    const folderCheck = await pool.request()
-                        .input('FolderID', parseInt(folderId))
-                        .query(`
-                            SELECT FolderName, ParentFolderID 
-                            FROM tenderFolder 
-                            WHERE FolderID = @FolderID
-                        `);
-                    
-                    const folderName = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].FolderName : '';
-                    const parentFolderId = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].ParentFolderID : undefined;
-                    
-                    // Check if it's a Drawings folder (direct or nested)
-                    let isDrawingsFolder = folderName === 'Drawings';
-                    if (!isDrawingsFolder && parentFolderId) {
-                        // Check parent folder
-                        const parentCheck = await pool.request()
-                            .input('ParentFolderID', parentFolderId)
-                            .query(`SELECT FolderName FROM tenderFolder WHERE FolderID = @ParentFolderID`);
-                        isDrawingsFolder = parentCheck.recordset && parentCheck.recordset[0] && parentCheck.recordset[0].FolderName === 'Drawings';
+                    // Check if the file was uploaded to the Drawings folder or any subfolder of it
+                    let isDrawingsFolder = false;
+                    let checkFolderId = parseInt(folderId);
+                    const maxDepth = 10;
+                    for (let depth = 0; depth < maxDepth; depth++) {
+                        const folderCheck = await pool.request()
+                            .input('FID', checkFolderId)
+                            .query(`SELECT FolderName, ParentFolderID FROM tenderFolder WHERE FolderID = @FID`);
+                        if (!folderCheck.recordset || folderCheck.recordset.length === 0) break;
+                        const row = folderCheck.recordset[0];
+                        if (row.FolderName === 'Drawings') {
+                            isDrawingsFolder = true;
+                            break;
+                        }
+                        if (!row.ParentFolderID) break;
+                        checkFolderId = row.ParentFolderID;
                     }
                     
                     if (isDrawingsFolder) {
                         const tenderIdInt = parseInt(docId);
                         const fileIdInt = parseInt(fileId);
-                        console.log(`[uploadFile] 🎨 File uploaded to Drawings folder - Auto-extracting drawing info...`);
-                        console.log(`[uploadFile] TenderID=${tenderIdInt}, FileID=${fileIdInt}, FolderName=${folderName}`);
+                        console.log(`[uploadFile] 🎨 File uploaded to Drawings folder (or subfolder) - Auto-extracting drawing info...`);
+                        console.log(`[uploadFile] TenderID=${tenderIdInt}, FileID=${fileIdInt}, FolderID=${folderId}`);
                         
                         // Import drawing controller
                         const drawingController = require('../drawing/drawingController');
@@ -1408,120 +1573,50 @@ ORDER BY f.CreatedAt DESC;
                         };
                         
                         try {
-                            // Call the extraction function directly
                             await drawingController.extractDrawingInfo(mockReq, mockRes);
                             
-                            // Verify that extraction succeeded and a record was saved
                             if (!extractionResult || !extractionResult.saved || !extractionResult.drawingId) {
-                                throw new Error(extractionError?.error || 'Drawing extraction failed - no record saved to tenderDrawing');
+                                throw new Error(extractionError?.error || 'Drawing extraction did not produce a saved record');
                             }
                             
-                            // Verify the record actually exists in tenderDrawing using the DrawingID that was returned
-                            const verifyResult = await pool.request()
-                                .input('DrawingID', extractionResult.drawingId)
-                                .query(`
-                                    SELECT DrawingID, DrawingNumber, Title 
-                                    FROM tenderDrawing 
-                                    WHERE DrawingID = @DrawingID
-                                `);
-                            
-                            if (verifyResult.recordset.length === 0) {
-                                // Fallback: try to find by TenderID + DrawingNumber if DrawingID lookup fails
-                                const drawingNumber = extractionResult.drawingNumber || 'UNKNOWN';
-                                const altVerify = await pool.request()
-                                    .input('TenderID', tenderIdInt)
-                                    .input('DrawingNumber', drawingNumber)
-                                    .query(`
-                                        SELECT DrawingID 
-                                        FROM tenderDrawing 
-                                        WHERE TenderID = @TenderID AND DrawingNumber = @DrawingNumber
-                                    `);
-                                
-                                if (altVerify.recordset.length === 0) {
-                                    throw new Error(`Drawing extraction completed but no record found in tenderDrawing table (DrawingID: ${extractionResult.drawingId}, DrawingNumber: ${drawingNumber})`);
-                                }
-                                
-                                console.log(`[uploadFile] ✅ Verified drawing exists using TenderID + DrawingNumber: DrawingID=${altVerify.recordset[0].DrawingID}`);
-                            } else {
-                                console.log(`[uploadFile] ✅ Verified drawing exists: DrawingID=${verifyResult.recordset[0].DrawingID}, DrawingNumber=${verifyResult.recordset[0].DrawingNumber}`);
-                            }
-                            
-                            console.log(`[uploadFile] ✅ Successfully extracted and saved drawing to tenderDrawing table for FileID=${fileIdInt}, DrawingID=${extractionResult.drawingId}`);
+                            console.log(`[uploadFile] ✅ AI extraction succeeded for FileID=${fileIdInt}, DrawingID=${extractionResult.drawingId}`);
                         } catch (extractErr) {
-                            console.error(`[uploadFile] ❌ Failed to extract drawing info for FileID=${fileIdInt}:`, extractErr.message);
-                            
-                            // DELETE THE FILE if extraction fails
-                            console.log(`[uploadFile] 🗑️ Deleting file record and blob because extraction failed...`);
-                            
-                            // Delete from database
-                            await pool.request()
-                                .input('FileID', fileIdInt)
-                                .query(`
-                                    DELETE FROM tenderFile 
-                                    WHERE FileID = @FileID
-                                `);
-                            
-                            // Delete from blob storage
+                            console.warn(`[uploadFile] ⚠️ AI extraction failed for FileID=${fileIdInt}: ${extractErr.message}`);
+                            // Fallback: always ensure a tenderDrawing record exists
                             try {
-                                const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
-                                await deleteBlobFile(blobPath);
-                                console.log(`[uploadFile] ✅ Deleted file from blob storage: ${blobPath}`);
-                            } catch (blobErr) {
-                                console.error(`[uploadFile] ⚠️ Failed to delete blob:`, blobErr.message);
+                                const existsCheck = await pool.request()
+                                    .input('TenderID', tenderIdInt)
+                                    .input('FileID', fileIdInt)
+                                    .query(`SELECT DrawingID FROM tenderDrawing WHERE TenderID = @TenderID AND FileID = @FileID`);
+                                if (existsCheck.recordset.length === 0) {
+                                    const fileName = originalName || file.originalname || 'Unknown';
+                                    const fallbackResult = await pool.request()
+                                        .input('TenderID', tenderIdInt)
+                                        .input('DrawingNumber', fileName.replace(/\.[^.]+$/, ''))
+                                        .input('Title', fileName)
+                                        .input('AddedBy', userId)
+                                        .input('FileID', fileIdInt)
+                                        .query(`
+                                            INSERT INTO tenderDrawing (TenderID, DrawingNumber, Title, AddedBy, FileID)
+                                            OUTPUT INSERTED.DrawingID
+                                            VALUES (@TenderID, @DrawingNumber, @Title, @AddedBy, @FileID)
+                                        `);
+                                    console.log(`[uploadFile] ✅ Fallback: Created tenderDrawing record DrawingID=${fallbackResult.recordset[0]?.DrawingID} for FileID=${fileIdInt}`);
+                                } else {
+                                    console.log(`[uploadFile] ✅ tenderDrawing record already exists for FileID=${fileIdInt}`);
+                                }
+                            } catch (fallbackErr) {
+                                console.warn(`[uploadFile] ⚠️ Fallback tenderDrawing insert also failed for FileID=${fileIdInt}:`, fallbackErr.message);
                             }
-                            
-                            // Return error response
-                            return res.status(400).json({ 
-                                error: 'Failed to extract drawing information',
-                                message: 'File was not saved because drawing extraction failed. Please ensure the file is a valid PDF or image drawing.',
-                                details: extractErr.message
-                            });
                         }
                     } else {
-                        console.log(`[uploadFile] Skipping drawing extraction: File not in Drawings folder (FolderName=${folderName}, FolderID=${folderId})`);
+                        console.log(`[uploadFile] Skipping drawing extraction: File not in Drawings folder (FolderID=${folderId})`);
                     }
                 } else {
                     console.log(`[uploadFile] Skipping drawing extraction: connectionTable=${connectionTable}, docId=${docId}, folderId=${folderId}`);
                 }
             } catch (drawingErr) {
-                console.error('[uploadFile] ❌ Error during drawing extraction:', drawingErr.message);
-                console.error('[uploadFile] Error stack:', drawingErr.stack);
-                
-                // If we're in a Drawings folder and extraction failed, delete the file
-                try {
-                    const folderCheck = await pool.request()
-                        .input('FolderID', parseInt(folderId))
-                        .query(`SELECT FolderName FROM tenderFolder WHERE FolderID = @FolderID`);
-                    
-                    const folderName = folderCheck.recordset && folderCheck.recordset[0] ? folderCheck.recordset[0].FolderName : '';
-                    
-                    if (folderName === 'Drawings' || (folderCheck.recordset && folderCheck.recordset[0]?.ParentFolderID)) {
-                        console.log(`[uploadFile] 🗑️ Deleting file because extraction error in Drawings folder...`);
-                        
-                        // Delete from database
-                        await pool.request()
-                            .input('FileID', parseInt(fileId))
-                            .query(`DELETE FROM tenderFile WHERE FileID = @FileID`);
-                        
-                        // Delete from blob storage
-                        try {
-                            const { deleteFile: deleteBlobFile } = require('../../config/azureBlobService');
-                            await deleteBlobFile(blobPath);
-                        } catch (blobErr) {
-                            console.error(`[uploadFile] ⚠️ Failed to delete blob:`, blobErr.message);
-                        }
-                        
-                        return res.status(400).json({ 
-                            error: 'Failed to extract drawing information',
-                            message: 'File was not saved because drawing extraction failed.',
-                            details: drawingErr.message
-                        });
-                    }
-                } catch (deleteErr) {
-                    console.error('[uploadFile] ❌ Failed to delete file after extraction error:', deleteErr);
-                }
-                
-                // Don't throw - let the upload continue if it's not a Drawings folder
+                console.warn('[uploadFile] ⚠️ Drawing extraction error (file kept):', drawingErr.message);
             }
 
             console.log('File upload completed successfully');
@@ -1707,6 +1802,15 @@ ORDER BY f.CreatedAt DESC;
                 // Continue with database deletion even if blob deletion fails
             }
 
+            // Delete associated drawing record first
+            try {
+                await pool.request()
+                    .input('DrawingFileID', parseInt(fileId))
+                    .query(`DELETE FROM tenderDrawing WHERE FileID = @DrawingFileID`);
+            } catch (drawingErr) {
+                console.warn('Could not delete associated drawing record for FileID', fileId, ':', (drawingErr && drawingErr.message) || drawingErr);
+            }
+
             // Hard delete from database
             await pool.request()
                 .input('FileID', fileId)
@@ -1756,6 +1860,37 @@ ORDER BY f.CreatedAt DESC;
         } catch (error) {
             console.error('Error updating file name:', error);
             res.status(500).json({ message: 'Failed to update file name' });
+        }
+    },
+
+    moveFileToFolder: async (req, res) => {
+        try {
+            const { fileId } = req.params;
+            const { folderId } = req.body;
+            const pool = await getConnectedPool();
+
+            if (!folderId) {
+                return res.status(400).json({ message: 'folderId is required' });
+            }
+
+            const result = await pool.request()
+                .input('FileID', parseInt(fileId))
+                .input('FolderID', parseInt(folderId))
+                .query(`
+                    UPDATE tenderFile
+                    SET FolderID = @FolderID, UpdatedAt = GETDATE()
+                    WHERE FileID = @FileID AND IsDeleted = 0;
+                    SELECT @@ROWCOUNT as UpdatedRows;
+                `);
+
+            if (result.recordset[0].UpdatedRows === 0) {
+                return res.status(404).json({ message: 'File not found' });
+            }
+
+            res.json({ message: 'File moved successfully' });
+        } catch (error) {
+            console.error('Error moving file to folder:', error);
+            res.status(500).json({ message: 'Failed to move file' });
         }
     },
 
@@ -1843,20 +1978,21 @@ ORDER BY f.CreatedAt DESC;
             }
 
             // Check if it's an Excel, Word, or PDF file
-            const isExcelFile = file.ContentType.includes('spreadsheet') || 
-                               file.ContentType.includes('excel') ||
+            const contentType = String(file.ContentType || '').toLowerCase();
+            const isExcelFile = contentType.includes('spreadsheet') || 
+                               contentType.includes('excel') ||
                                file.DisplayName.toLowerCase().endsWith('.xlsx') ||
                                file.DisplayName.toLowerCase().endsWith('.xls');
             
-            const isWordFile = file.ContentType && (
-                               file.ContentType.includes('wordprocessingml') ||
-                               file.ContentType.includes('msword') ||
-                               file.ContentType.includes('document')
+            const isWordFile = contentType && (
+                               contentType.includes('wordprocessingml') ||
+                               contentType.includes('msword') ||
+                               contentType.includes('document')
                                ) || 
                                file.DisplayName.toLowerCase().endsWith('.docx') ||
                                file.DisplayName.toLowerCase().endsWith('.doc');
 
-            const isPdfFile = file.ContentType.includes('pdf') ||
+            const isPdfFile = contentType.includes('pdf') ||
                              file.DisplayName.toLowerCase().endsWith('.pdf');
 
             console.log('🔍 File type check:', {
@@ -1877,6 +2013,7 @@ ORDER BY f.CreatedAt DESC;
 
             // Generate SAS URL for the blob
             const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+            const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
             const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
             if (!account || !containerName) {
@@ -2232,23 +2369,27 @@ ORDER BY f.CreatedAt DESC;
         }
     },
 
-    // Download multiple files as ZIP
+    // Download multiple files as ZIP (optionally preserving folder structure)
     downloadFilesAsZip: async (req, res) => {
         try {
-            const { fileIds, zipName } = req.body;
+            const { fileIds, zipName, fileEntries } = req.body;
             const pool = await getConnectedPool();
             const userId = req.user.UserID;
 
-            if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
-                return res.status(400).json({ error: 'File IDs array is required' });
+            const requestedFileIds = Array.isArray(fileEntries) && fileEntries.length > 0
+                ? fileEntries.map((entry) => parseInt(entry.id)).filter((id) => !Number.isNaN(id))
+                : (Array.isArray(fileIds) ? fileIds.map((id) => parseInt(id)).filter((id) => !Number.isNaN(id)) : []);
+
+            if (!requestedFileIds || requestedFileIds.length === 0) {
+                return res.status(400).json({ error: 'File IDs array is required (or fileEntries with ids)' });
             }
 
-            console.log(`🔍 ZIP download request for ${fileIds.length} files by user: ${userId}`);
+            console.log(`🔍 ZIP download request for ${requestedFileIds.length} files by user: ${userId}`);
 
             // Get file information for all requested files
-            const fileIdsParam = fileIds.map((id, index) => `@FileID${index}`).join(', ');
+            const fileIdsParam = requestedFileIds.map((id, index) => `@FileID${index}`).join(', ');
             const request = pool.request();
-            fileIds.forEach((id, index) => {
+            requestedFileIds.forEach((id, index) => {
                 request.input(`FileID${index}`, parseInt(id));
             });
             request.input('UserID', userId);
@@ -2256,7 +2397,7 @@ ORDER BY f.CreatedAt DESC;
             const query = `
                 SELECT FileID, DisplayName, BlobPath, ContentType
                 FROM tenderFile
-                WHERE FileID IN (${fileIds.map((_, i) => `@FileID${i}`).join(', ')})
+                WHERE FileID IN (${requestedFileIds.map((_, i) => `@FileID${i}`).join(', ')})
                   AND AddBy = @UserID
                   AND IsDeleted = 0
             `;
@@ -2269,6 +2410,23 @@ ORDER BY f.CreatedAt DESC;
 
             const files = result.recordset;
             console.log(`📦 Found ${files.length} files to include in ZIP`);
+
+            // Optional file path map from client to preserve folder structure
+            const filePathMap = new Map();
+            if (Array.isArray(fileEntries)) {
+                fileEntries.forEach((entry) => {
+                    const fileId = parseInt(entry?.id);
+                    if (Number.isNaN(fileId)) return;
+                    const rawPath = typeof entry?.path === 'string' ? entry.path : '';
+                    // Normalize slashes and strip path traversal parts
+                    const safePath = rawPath
+                        .replace(/\\/g, '/')
+                        .split('/')
+                        .filter((segment) => segment && segment !== '.' && segment !== '..')
+                        .join('/');
+                    filePathMap.set(fileId, safePath);
+                });
+            }
 
             // Set headers for ZIP download
             const finalZipName = zipName || `drawings_${Date.now()}.zip`;
@@ -2298,8 +2456,12 @@ ORDER BY f.CreatedAt DESC;
                     const stream = await downloadFile(file.BlobPath);
                     
                     if (stream) {
-                        // Use the original filename in the ZIP
-                        archive.append(stream, { name: file.DisplayName });
+                        // Use folder structure if provided; otherwise flat file name
+                        const relativePath = filePathMap.get(file.FileID);
+                        const archiveName = relativePath
+                            ? `${relativePath}/${file.DisplayName}`
+                            : file.DisplayName;
+                        archive.append(stream, { name: archiveName });
                     } else {
                         console.warn(`⚠️ Could not get stream for file: ${file.DisplayName}`);
                     }
