@@ -5,7 +5,8 @@ const router = express.Router();
 const {
   findLinkedInProfilesPlayground,
   getSearchHistory,
-  testTableCreation
+  testTableCreation,
+  discoverySearch
 } = require('../controllers/contact/linkedinFinderController');
 
 const { authenticateToken } = require('../middleware/auth');
@@ -41,6 +42,15 @@ router.get('/contact/:contactId/history', authenticateToken, hasAnyPermission, (
     getSearchHistory(req, res);
   } else {
     res.status(500).json({ error: 'getSearchHistory is not a function' });
+  }
+});
+
+// Discovery search for companies/people from web + LinkedIn
+router.post('/discovery/search', authenticateToken, hasAnyPermission, (req, res) => {
+  if (typeof discoverySearch === 'function') {
+    discoverySearch(req, res);
+  } else {
+    res.status(500).json({ error: 'discoverySearch is not a function' });
   }
 });
 

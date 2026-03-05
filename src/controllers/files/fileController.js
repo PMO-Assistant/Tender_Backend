@@ -17,19 +17,28 @@ const upload = multer({
     }
 });
 
+// Deduplicate concurrent ensure calls per tender+project on the backend side.
+const ensureTenderFolderInFlight = new Map();
+
+const safeParseJson = (rawValue) => {
+    if (!rawValue) return null;
+    try {
+        return JSON.parse(rawValue);
+    } catch {
+        return null;
+    }
+};
+
 const fileController = {
     // Get all folders for the authenticated user
     getAllFolders: async (req, res) => {
         try {
+            const startedAt = Date.now();
             const pool = await getConnectedPool();
-            const userId = req.user.UserID;
-
-            console.log('Getting folders for user:', userId);
 
             const result = await pool.request()
-                .input('UserID', userId)
                 .query(`
-                    SELECT DISTINCT
+                    SELECT
                         f.FolderID,
                         f.ParentFolderID,
                         f.FolderName,
@@ -40,70 +49,38 @@ const fileController = {
                         f.CreatedAt,
                         f.UpdatedAt,
                         f.DocID,
-                        f.ConnectionTable,
-                        u.Name as CreatedBy
-                    FROM tenderFolder f
-                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
+                        f.ConnectionTable
+                    FROM tenderFolder f WITH (READUNCOMMITTED)
                     WHERE f.IsActive = 1
-                    ORDER BY f.DisplayOrder, f.FolderName
+                    ORDER BY f.ParentFolderID, f.FolderID
                 `);
 
-            console.log('Raw folders from DB:', result.recordset);
-
-            // Build folder hierarchy
-            const folders = result.recordset;
-            const folderMap = {};
-            const rootFolders = [];
-
-            // Create a map of folders by ID with correct property names
-            folders.forEach(folder => {
-                folderMap[folder.FolderID] = {
-                    id: folder.FolderID,
-                    name: folder.FolderName,
-                    path: folder.FolderPath,
-                    type: folder.FolderType,
-                    parentId: folder.ParentFolderID,
-                    displayOrder: folder.DisplayOrder,
-                    isActive: folder.IsActive,
-                    createdAt: folder.CreatedAt,
-                    updatedAt: folder.UpdatedAt,
-                    docId: folder.DocID,
-                    connectionTable: folder.ConnectionTable,
-                    createdBy: folder.CreatedBy,
-                    children: []
-                };
-            });
-
-            // Build the hierarchy
-            folders.forEach(folder => {
-                if (folder.ParentFolderID === null) {
-                    rootFolders.push(folderMap[folder.FolderID]);
-                } else if (folderMap[folder.ParentFolderID]) {
-                    folderMap[folder.ParentFolderID].children.push(folderMap[folder.FolderID]);
-                }
-            });
-
-            console.log('Processed folders:', rootFolders);
-
-            // Return all folders in a flat structure for frontend filtering
-            const allFolders = Object.values(folderMap).map(folder => ({
-                id: folder.id,
-                name: folder.name,
-                path: folder.path,
-                parentFolderId: folder.parentId,
-                folderType: folder.type,
-                displayOrder: folder.displayOrder,
-                isActive: folder.isActive,
-                createdAt: folder.createdAt,
-                updatedAt: folder.updatedAt,
-                docId: folder.docId,
-                connectionTable: folder.connectionTable,
-                createdBy: folder.createdBy
+            const allFolders = result.recordset.map(folder => ({
+                id: folder.FolderID,
+                name: folder.FolderName,
+                path: folder.FolderPath,
+                parentFolderId: folder.ParentFolderID,
+                folderType: folder.FolderType,
+                displayOrder: folder.DisplayOrder,
+                isActive: folder.IsActive,
+                createdAt: folder.CreatedAt,
+                updatedAt: folder.UpdatedAt,
+                docId: folder.DocID,
+                connectionTable: folder.ConnectionTable,
+                createdBy: null
             }));
 
+            const elapsed = Date.now() - startedAt;
+            if (elapsed > 2000) {
+                console.warn(`[getAllFolders] Slow query: ${elapsed}ms, rows=${allFolders.length}`);
+            }
             res.json({ folders: allFolders });
         } catch (error) {
-            console.error('Error getting folders:', error);
+            console.error('Error getting folders:', {
+                message: error.message,
+                code: error.code,
+                number: error.number
+            });
             res.status(500).json({ message: 'Failed to get folders' });
         }
     },
@@ -431,7 +408,6 @@ const fileController = {
     ensureTenderFolder: async (req, res) => {
         try {
             const { tenderId, projectName } = req.body;
-            const pool = await getConnectedPool();
             const userId = req.user.UserID;
 
             if (!tenderId || !projectName) {
@@ -442,116 +418,159 @@ const fileController = {
             const safeProjectName = String(projectName || '').trim();
             const tenderFolderName = `${tenderId} - ${safeProjectName}`;
             const tenderFolderPath = `/Tender/${tenderFolderName}`;
+            const dedupeKey = `${tenderId}|${safeProjectName.toLowerCase()}`;
 
-            // Atomic check-and-create for the tender parent folder
-            const folderResult = await pool.request()
-                .input('FolderName', tenderFolderName)
-                .input('FolderPath', tenderFolderPath)
-                .input('FolderType', 'sub')
-                .input('ParentFolderID', rootTenderFolderId)
-                .input('AddBy', userId)
-                .input('DocID', tenderId)
-                .input('ConnectionTable', 'tenderTender')
-                .query(`
-                    IF NOT EXISTS (
-                        SELECT 1 FROM tenderFolder
-                        WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID = @ParentFolderID
-                    )
-                    BEGIN
-                        INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                        OUTPUT INSERTED.FolderID
-                        VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
-                    END
-                    ELSE
-                    BEGIN
-                        SELECT TOP 1 FolderID FROM tenderFolder
-                        WHERE DocID = @DocID AND ConnectionTable = @ConnectionTable AND ParentFolderID = @ParentFolderID
-                    END
+            // If same ensure request is currently running, reuse its result.
+            if (ensureTenderFolderInFlight.has(dedupeKey)) {
+                console.log(`[ensureTenderFolder] Reusing in-flight ensure for key: ${dedupeKey}`);
+                const payload = await ensureTenderFolderInFlight.get(dedupeKey);
+                return res.json(payload);
+            }
+
+            const ensureWork = (async () => {
+                const startedAt = Date.now();
+                const pool = await getConnectedPool();
+
+                const subNames = [
+                    '01. Tender Issue',
+                    '02. Addendums & Clarifications & RFIs',
+                    '03. Site Photos',
+                    '04. BOQ Trade Packages',
+                    '05. Draft BOQ & Prelimns',
+                    '06. Quotes',
+                    '07. Programme',
+                    '08. Tender Submitted',
+                    '09. Post Tender Clarifications',
+                    '10. Final Contract Documents',
+                    '11. Brian & Steven Work in Progress'
+                ];
+
+                const requiredPaths = [
+                    tenderFolderPath,
+                    ...subNames.map(name => `${tenderFolderPath}/${name}`),
+                    `${tenderFolderPath}/01. Tender Issue/Drawings`
+                ];
+
+                // Preload all required folder paths in one indexed query.
+                const preloadReq = pool.request();
+                requiredPaths.forEach((folderPath, idx) => preloadReq.input(`Path${idx}`, folderPath));
+                const inParams = requiredPaths.map((_, idx) => `@Path${idx}`).join(', ');
+                const existingRows = await preloadReq.query(`
+                    SELECT FolderID, FolderPath, IsActive
+                    FROM tenderFolder
+                    WHERE FolderPath IN (${inParams})
                 `);
-            const tenderFolderId = folderResult.recordset[0].FolderID;
 
-            // Create all standard tender subfolders
-            const subNames = [
-                '01. Tender Issue',
-                '02. Addendums & Clarifications & RFIs',
-                '03. Site Photos',
-                '04. BOQ Trade Packages',
-                '05. Draft BOQ & Prelimns',
-                '06. Quotes',
-                '07. Programme',
-                '08. Tender Submitted',
-                '09. Post Tender Clarifications',
-                '10. Final Contract Documents',
-                '11. Brian & Steven Work in Progress'
-            ];
-            const subfolderIds = {};
-            for (const name of subNames) {
-                const subPath = `${tenderFolderPath}/${name}`;
-                const result = await pool.request()
-                    .input('FolderName', name)
-                    .input('FolderPath', subPath)
-                    .input('FolderType', 'sub')
-                    .input('ParentFolderID', tenderFolderId)
-                    .input('AddBy', userId)
-                    .input('DocID', tenderId)
-                    .input('ConnectionTable', 'tenderTender')
-                    .query(`
-                        IF NOT EXISTS (
-                            SELECT 1 FROM tenderFolder 
-                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
-                        )
-                        BEGIN
-                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
-                            OUTPUT INSERTED.FolderID
-                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
-                        END
-                        ELSE
-                        BEGIN
-                            UPDATE tenderFolder SET IsActive = 1 WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName AND IsActive = 0;
-                            SELECT TOP 1 FolderID FROM tenderFolder
-                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
-                        END
-                    `);
-                subfolderIds[name] = result.recordset[0]?.FolderID;
+                const existingByPath = new Map(existingRows.recordset.map(r => [r.FolderPath, r]));
+
+                const ensureFolderByPath = async ({ folderName, folderPath, parentFolderID, docID, connectionTable, folderType = 'sub' }) => {
+                    const existing = existingByPath.get(folderPath);
+                    if (existing) {
+                        if (!existing.IsActive) {
+                            await pool.request()
+                                .input('FolderID', existing.FolderID)
+                                .query(`
+                                    UPDATE tenderFolder
+                                    SET IsActive = 1, UpdatedAt = GETDATE()
+                                    WHERE FolderID = @FolderID
+                                `);
+                            existing.IsActive = 1;
+                        }
+                        return existing.FolderID;
+                    }
+
+                    try {
+                        const inserted = await pool.request()
+                            .input('FolderName', folderName)
+                            .input('FolderPath', folderPath)
+                            .input('FolderType', folderType)
+                            .input('ParentFolderID', parentFolderID)
+                            .input('AddBy', userId)
+                            .input('DocID', docID)
+                            .input('ConnectionTable', connectionTable)
+                            .query(`
+                                INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
+                                OUTPUT INSERTED.FolderID
+                                VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+                            `);
+                        const newId = inserted.recordset[0]?.FolderID;
+                        if (newId) {
+                            existingByPath.set(folderPath, { FolderID: newId, FolderPath: folderPath, IsActive: 1 });
+                        }
+                        return newId;
+                    } catch (insertErr) {
+                        if (insertErr && (insertErr.number === 2601 || insertErr.number === 2627)) {
+                            const afterConflict = await pool.request()
+                                .input('FolderPath', folderPath)
+                                .query(`
+                                    SELECT TOP 1 FolderID
+                                    FROM tenderFolder
+                                    WHERE FolderPath = @FolderPath
+                                `);
+                            if (afterConflict.recordset.length > 0) {
+                                const resolvedId = afterConflict.recordset[0].FolderID;
+                                existingByPath.set(folderPath, { FolderID: resolvedId, FolderPath: folderPath, IsActive: 1 });
+                                return resolvedId;
+                            }
+                        }
+                        throw insertErr;
+                    }
+                };
+
+                const tenderFolderId = await ensureFolderByPath({
+                    folderName: tenderFolderName,
+                    folderPath: tenderFolderPath,
+                    parentFolderID: rootTenderFolderId,
+                    docID: tenderId,
+                    connectionTable: 'tenderTender',
+                    folderType: 'sub'
+                });
+
+                const subfolderIds = {};
+                for (const name of subNames) {
+                    const subPath = `${tenderFolderPath}/${name}`;
+                    subfolderIds[name] = await ensureFolderByPath({
+                        folderName: name,
+                        folderPath: subPath,
+                        parentFolderID: tenderFolderId,
+                        docID: tenderId,
+                        connectionTable: 'tenderTender',
+                        folderType: 'sub'
+                    });
+                }
+
+                const tenderIssueFolderId = subfolderIds['01. Tender Issue'];
+                if (tenderIssueFolderId) {
+                    const drawingsPath = `${tenderFolderPath}/01. Tender Issue/Drawings`;
+                    subfolderIds.Drawings = await ensureFolderByPath({
+                        folderName: 'Drawings',
+                        folderPath: drawingsPath,
+                        parentFolderID: tenderIssueFolderId,
+                        docID: tenderId,
+                        connectionTable: 'tenderTender',
+                        folderType: 'sub'
+                    });
+                }
+
+                const elapsed = Date.now() - startedAt;
+                if (elapsed > 3000) {
+                    console.warn(`[ensureTenderFolder] Slow ensure for tender ${tenderId}: ${elapsed}ms`);
+                }
+
+                return {
+                    folderId: tenderFolderId,
+                    folderPath: tenderFolderPath,
+                    subfolders: subfolderIds
+                };
+            })();
+
+            ensureTenderFolderInFlight.set(dedupeKey, ensureWork);
+            try {
+                const payload = await ensureWork;
+                return res.json(payload);
+            } finally {
+                ensureTenderFolderInFlight.delete(dedupeKey);
             }
-
-            // Create "Drawings" subfolder inside "01. Tender Issue"
-            const tenderIssueFolderId = subfolderIds['01. Tender Issue'];
-            if (tenderIssueFolderId) {
-                const drawingsPath = `${tenderFolderPath}/01. Tender Issue/Drawings`;
-                const drawingsResult = await pool.request()
-                    .input('FolderName', 'Drawings')
-                    .input('FolderPath', drawingsPath)
-                    .input('FolderType', 'sub')
-                    .input('ParentFolderID', tenderIssueFolderId)
-                    .input('AddBy', userId)
-                    .input('DocID', tenderId)
-                    .input('ConnectionTable', 'tenderTender')
-                    .query(`
-                        IF NOT EXISTS (
-                            SELECT 1 FROM tenderFolder
-                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
-                        )
-                        BEGIN
-                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
-                            OUTPUT INSERTED.FolderID
-                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
-                        END
-                        ELSE
-                        BEGIN
-                            UPDATE tenderFolder SET IsActive = 1 WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName AND IsActive = 0;
-                            SELECT TOP 1 FolderID FROM tenderFolder
-                            WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
-                        END
-                    `);
-                subfolderIds['Drawings'] = drawingsResult.recordset[0]?.FolderID;
-            }
-
-            res.json({
-                folderId: tenderFolderId,
-                folderPath: tenderFolderPath,
-                subfolders: subfolderIds
-            });
         } catch (error) {
             console.error('Error ensuring tender folder:', error);
             console.error('Error stack:', error.stack);
@@ -606,7 +625,8 @@ const fileController = {
                 .query(`
                     SELECT FolderID, FolderName, FolderPath, IsActive
                     FROM tenderFolder 
-                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                    WHERE ParentFolderID = @ParentFolderID
+                      AND LOWER(LTRIM(RTRIM(FolderName))) = LOWER(LTRIM(RTRIM(@FolderName)))
                 `);
 
             let newFolder;
@@ -873,13 +893,14 @@ ORDER BY f.CreatedAt DESC;
     // Get all files for the authenticated user (updated to include folder info)
     getAllFiles: async (req, res) => {
         try {
+            const startedAt = Date.now();
             const pool = await getConnectedPool();
             const userId = req.user.UserID;
 
             const result = await pool.request()
                 .input('UserID', userId)
                 .query(`
-                    SELECT TOP 10
+                    SELECT TOP 50
                         f.FileID,
                         f.DisplayName,
                         f.BlobPath,
@@ -897,12 +918,12 @@ ORDER BY f.CreatedAt DESC;
                         tf.FolderName,
                         tf.FolderPath,
                         CASE WHEN ff.FileFavID IS NOT NULL THEN 1 ELSE 0 END as isStarred
-                    FROM tenderFile f
-                    LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
-                    LEFT JOIN tenderFolder tf ON f.FolderID = tf.FolderID
-                    LEFT JOIN tenderFileFav ff ON f.FileID = ff.FileID AND ff.UserID = @UserID
+                    FROM tenderFile f WITH (READUNCOMMITTED)
+                    LEFT JOIN tenderEmployee u WITH (READUNCOMMITTED) ON f.AddBy = u.UserID
+                    LEFT JOIN tenderFolder tf WITH (READUNCOMMITTED) ON f.FolderID = tf.FolderID
+                    LEFT JOIN tenderFileFav ff WITH (READUNCOMMITTED) ON f.FileID = ff.FileID AND ff.UserID = @UserID
                     WHERE f.IsDeleted = 0 AND f.AddBy = @UserID
-                    ORDER BY f.CreatedAt DESC
+                    ORDER BY f.FileID DESC
                 `);
 
             const files = result.recordset.map(file => ({
@@ -921,14 +942,22 @@ ORDER BY f.CreatedAt DESC;
                 folderPath: file.FolderPath,
                 docId: file.DocID,
                 connectionTable: file.ConnectionTable,
-                metadata: file.Metadata ? JSON.parse(file.Metadata) : null,
+                metadata: safeParseJson(file.Metadata),
                 type: getFileType(file.ContentType, file.DisplayName),
                 isStarred: file.isStarred === 1
             }));
 
+            const elapsed = Date.now() - startedAt;
+            if (elapsed > 2000) {
+                console.warn(`[getAllFiles] Slow query for user ${userId}: ${elapsed}ms, rows=${files.length}`);
+            }
             res.json({ files });
         } catch (error) {
-            console.error('Error getting files:', error);
+            console.error('Error getting files:', {
+                message: error.message,
+                code: error.code,
+                number: error.number
+            });
             res.status(500).json({ message: 'Failed to get files' });
         }
     },
@@ -1017,7 +1046,7 @@ ORDER BY f.CreatedAt DESC;
                     FROM tenderFile f
                     LEFT JOIN tenderEmployee u ON f.AddBy = u.UserID
                     LEFT JOIN tenderFolder tf ON f.FolderID = tf.FolderID
-                    WHERE f.FileID = @FileID AND f.AddBy = @UserID AND f.IsDeleted = 0
+                    WHERE f.FileID = @FileID AND f.IsDeleted = 0
                 `);
 
             if (result.recordset.length === 0) {
@@ -1316,9 +1345,18 @@ ORDER BY f.CreatedAt DESC;
                                         .input('DocID', rfqTenderId)
                                         .input('ConnectionTable', 'tenderTender')
                                         .query(`
-                                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                                            OUTPUT INSERTED.FolderID
-                                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                                            IF NOT EXISTS (
+                                                SELECT 1 FROM tenderFolder WHERE FolderPath = @FolderPath
+                                            )
+                                            BEGIN
+                                                INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                                                OUTPUT INSERTED.FolderID
+                                                VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                                            END
+                                            ELSE
+                                            BEGIN
+                                                SELECT TOP 1 FolderID FROM tenderFolder WHERE FolderPath = @FolderPath
+                                            END
                                         `);
                                     folderId = insertBoq.recordset[0].FolderID;
                                 }
@@ -1971,7 +2009,7 @@ ORDER BY f.CreatedAt DESC;
 
             const file = fileResult.recordset[0];
             const isOwner = file.AddBy === userId;
-            const isAdmin = file.Admin === 1;
+            const isAdmin = file.Admin === 1 || file.Admin === true || Number(file.Admin) === 1;
 
             if (!isOwner && !isAdmin) {
                 return res.status(403).json({ error: 'Access denied' });

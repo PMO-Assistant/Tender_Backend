@@ -251,9 +251,18 @@ async function uploadAttachment(req, res) {
                         .input('DocID', parseInt(taskId))
                         .input('ConnectionTable', 'tenderTask')
                         .query(`
-                            INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
-                            OUTPUT INSERTED.FolderID
-                            VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                            IF NOT EXISTS (
+                                SELECT 1 FROM tenderFolder WHERE FolderPath = @FolderPath
+                            )
+                            BEGIN
+                                INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable)
+                                OUTPUT INSERTED.FolderID
+                                VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable)
+                            END
+                            ELSE
+                            BEGIN
+                                SELECT TOP 1 FolderID FROM tenderFolder WHERE FolderPath = @FolderPath
+                            END
                         `);
 
                     folderId = insertResult.recordset[0].FolderID;

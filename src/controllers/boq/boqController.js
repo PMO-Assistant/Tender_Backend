@@ -568,9 +568,47 @@ async function splitBOQIntoPackages(fileBuffer, fileName, packages, packageRange
           nextTargetRow = headerRowsCopied + 1;
         }
 
-        // Sort and unique the rows
+        // Sort and unique the explicitly assigned rows first
         const uniqueRows = Array.from(new Set(rowsBySheet[srcSheetName].filter(r=>typeof r==='number' && !isNaN(r)))).sort((a,b)=>a-b);
-        for (const rowIndex of uniqueRows) {
+        if (uniqueRows.length === 0) {
+          continue;
+        }
+
+        // Preserve blank separator rows between selected rows so output keeps visual structure.
+        // We only auto-include rows that are truly empty to avoid pulling in unrelated package lines.
+        const isRowEmpty = (rowObj) => {
+          let hasContent = false;
+          rowObj.eachCell({ includeEmpty: true }, (cell) => {
+            const value = cell?.value;
+            if (value === null || value === undefined) return;
+            if (typeof value === 'string') {
+              if (value.trim() !== '') hasContent = true;
+              return;
+            }
+            hasContent = true;
+          });
+          return !hasContent;
+        };
+
+        const rowsToCopy = [];
+        for (let i = 0; i < uniqueRows.length; i++) {
+          const current = uniqueRows[i];
+          rowsToCopy.push(current);
+
+          // Fill only EMPTY rows in the gap up to the next selected row
+          const next = uniqueRows[i + 1];
+          if (typeof next === 'number' && next > current + 1) {
+            for (let gapRow = current + 1; gapRow < next; gapRow++) {
+              const gapRowObj = sourceSheet.getRow(gapRow);
+              if (isRowEmpty(gapRowObj)) {
+                rowsToCopy.push(gapRow);
+              }
+            }
+          }
+        }
+
+        rowsToCopy.sort((a, b) => a - b);
+        for (const rowIndex of rowsToCopy) {
           const srcRowObj = sourceSheet.getRow(rowIndex);
           const tgtRowObj = targetWorksheet.getRow(nextTargetRow);
 
@@ -1020,6 +1058,7 @@ async function extractFullExcelData(fileBuffer) {
       }
       
       // Process rows
+      let lastPopulatedRow = 0;
       for (let row = 1; row <= worksheet.rowCount; row++) {
         const rowObj = worksheet.getRow(row);
         const rowData = {
@@ -1159,9 +1198,13 @@ async function extractFullExcelData(fileBuffer) {
           rowData.cells.push(cellData);
         }
         
+        // Keep all rows for frontend rendering (including empty separator rows).
+        // We'll trim trailing empty rows after the loop using lastPopulatedRow.
+        sheetData.rows.push(rowData);
+
         if (hasContent) {
-          sheetData.rows.push(rowData);
-          
+          lastPopulatedRow = row;
+
           // Add to structure for backward compatibility
           structure.push({
             rowNumber: row,
@@ -1170,16 +1213,21 @@ async function extractFullExcelData(fileBuffer) {
           });
         }
       }
+
+      // Keep rows from top until last populated row, including empty rows in between.
+      if (lastPopulatedRow > 0) {
+        sheetData.rows = sheetData.rows.filter(r => r.index <= lastPopulatedRow);
+      } else {
+        sheetData.rows = [];
+      }
       
       // Get merged cells
       if (worksheet.model && worksheet.model.merges) {
         worksheet.model.merges.forEach(merge => {
-          sheetData.mergedCells.push({
-            top: merge.top,
-            left: merge.left,
-            bottom: merge.bottom,
-            right: merge.right
-          });
+          const bounds = getMergeBounds(merge);
+          if (bounds) {
+            sheetData.mergedCells.push(bounds);
+          }
         });
       }
       
@@ -1260,15 +1308,55 @@ function columnLettersToNumber(letters) {
 
 function parseA1Range(range) {
   // e.g., "A1:F1" -> { startCol, startRow, endCol, endRow }
-  if (!range || !range.start || !range.end) return null;
-  const startMatch = range.start.match(/([A-Za-z]+)(\d+)/);
-  const endMatch = range.end.match(/([A-Za-z]+)(\d+)/);
+  if (!range) return null;
+  let startRef = null;
+  let endRef = null;
+
+  if (typeof range === 'string') {
+    const parts = range.split(':');
+    if (parts.length !== 2) return null;
+    startRef = parts[0];
+    endRef = parts[1];
+  } else if (typeof range === 'object' && range.start && range.end) {
+    startRef = range.start;
+    endRef = range.end;
+  } else {
+    return null;
+  }
+
+  const startMatch = String(startRef).match(/([A-Za-z]+)(\d+)/);
+  const endMatch = String(endRef).match(/([A-Za-z]+)(\d+)/);
   if (!startMatch || !endMatch) return null;
   const startCol = columnLettersToNumber(startMatch[1]);
   const startRow = parseInt(startMatch[2], 10);
   const endCol = columnLettersToNumber(endMatch[1]);
   const endRow = parseInt(endMatch[2], 10);
   return { startCol, startRow, endCol, endRow };
+}
+
+function getMergeBounds(merge) {
+  if (!merge) return null;
+  if (
+    typeof merge.top === 'number' &&
+    typeof merge.left === 'number' &&
+    typeof merge.bottom === 'number' &&
+    typeof merge.right === 'number'
+  ) {
+    return {
+      top: merge.top,
+      left: merge.left,
+      bottom: merge.bottom,
+      right: merge.right
+    };
+  }
+  const parsed = parseA1Range(merge);
+  if (!parsed) return null;
+  return {
+    top: parsed.startRow,
+    left: parsed.startCol,
+    bottom: parsed.endRow,
+    right: parsed.endCol
+  };
 }
 
 async function copyHeaderRange(sourceSheet, targetSheet, headerRange) {
@@ -1314,10 +1402,12 @@ async function copyHeaderRange(sourceSheet, targetSheet, headerRange) {
   // Copy merged cells within header range
   if (sourceSheet.model && sourceSheet.model.merges) {
     for (const merge of sourceSheet.model.merges) {
-      const mergeStartRow = merge.top;
-      const mergeEndRow = merge.bottom;
-      const mergeStartCol = merge.left;
-      const mergeEndCol = merge.right;
+      const bounds = getMergeBounds(merge);
+      if (!bounds) continue;
+      const mergeStartRow = bounds.top;
+      const mergeEndRow = bounds.bottom;
+      const mergeStartCol = bounds.left;
+      const mergeEndCol = bounds.right;
       const inRowRange = mergeStartRow >= startRow && mergeEndRow <= endRow;
       const inColRange = mergeStartCol >= startCol && mergeEndCol <= endCol;
       if (inRowRange && inColRange) {
@@ -1408,16 +1498,18 @@ async function copyPackageRows(sourceSheet, targetSheet, packageRange, targetSta
     // Copy merged cells within the package range
     if (sourceSheet.model && sourceSheet.model.merges) {
       for (const merge of sourceSheet.model.merges) {
+        const bounds = getMergeBounds(merge);
+        if (!bounds) continue;
         // Check if this merge is within our package range
-        const mergeStartRow = merge.top;
-        const mergeEndRow = merge.bottom;
+        const mergeStartRow = bounds.top;
+        const mergeEndRow = bounds.bottom;
         
         if (mergeStartRow >= packageRange.startRow && mergeEndRow <= packageRange.endRow) {
           // Calculate new row numbers for target sheet
           const newTop = mergeStartRow - packageRange.startRow + 1;
           const newBottom = mergeEndRow - packageRange.startRow + 1;
           
-          targetSheet.mergeCells(newTop, merge.left, newBottom, merge.right);
+          targetSheet.mergeCells(newTop, bounds.left, newBottom, bounds.right);
         }
       }
     }
@@ -2465,22 +2557,6 @@ const boqController = {
       const stream = await downloadFile(fileRow.BlobPath);
       const fileBuffer = await streamToBuffer(stream);
       
-      // Try AI parsing (fallbacks preserved)
-      let blocksResult = await callOpenAIForBOQBlocks(await getBoqTextForFile(fileRow), packages);
-      if (blocksResult.blocks.length === 0) {
-        console.log('OpenAI failed to parse BOQ blocks, trying Mistral');
-        blocksResult = await callMistralForBOQBlocks(await getBoqTextForFile(fileRow), packages);
-      }
-      if (blocksResult.blocks.length === 0) {
-        console.log('Both AI services failed to parse BOQ blocks, using fallback parser');
-        const fallbackBlocks = createFallbackBOQBlocks(await getBoqTextForFile(fileRow), packages);
-        if (fallbackBlocks.length === 0) {
-          return res.status(400).json({ error: 'Failed to parse BOQ blocks - no content found' });
-        }
-        blocksResult.blocks = fallbackBlocks;
-        blocksResult.source = 'fallback';
-      }
-      
       // Split using v2/v1 ranges
       const splitFiles = await splitBOQIntoPackages(
         fileBuffer,
@@ -2556,7 +2632,7 @@ const boqController = {
       return res.json({
         success: true,
         message: `BOQ split into ${uploadedFiles.length} files successfully`,
-        source: blocksResult.source,
+        source: 'manual',
         splitFiles: uploadedFiles
       });
     } catch (error) {

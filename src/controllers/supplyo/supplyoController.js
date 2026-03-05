@@ -134,7 +134,9 @@ const supplyoController = {
 	createCompany: async (req, res) => {
 		try {
 			const pool = await getConnectedPool();
-			const { CompanyName, PrimaryService, Rating, Address } = req.body;
+			const { PrimaryService, Rating, Address } = req.body;
+			const rawCompanyName = req.body?.CompanyName ?? req.body?.Name ?? req.body?.companyName;
+			const CompanyName = typeof rawCompanyName === 'string' ? rawCompanyName.trim() : '';
 			const userId = req.user?.UserID;
 
 			if (!CompanyName) {

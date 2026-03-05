@@ -520,19 +520,34 @@ const tenderController = {
                             .input('DocID', newTenderId)
                             .input('ConnectionTable', connectionTable)
                             .query(`
-                                IF NOT EXISTS (
-                                    SELECT 1 FROM tenderFolder
-                                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                                IF EXISTS (
+                                    SELECT 1
+                                    FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID
+                                      AND LOWER(LTRIM(RTRIM(FolderName))) = LOWER(LTRIM(RTRIM(@FolderName)))
                                 )
+                                BEGIN
+                                    DECLARE @KeepFolderID INT;
+                                    SELECT TOP 1 @KeepFolderID = FolderID
+                                    FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID
+                                      AND LOWER(LTRIM(RTRIM(FolderName))) = LOWER(LTRIM(RTRIM(@FolderName)))
+                                    ORDER BY
+                                      CASE WHEN IsActive = 1 THEN 0 ELSE 1 END,
+                                      FolderID ASC;
+
+                                    UPDATE tenderFolder
+                                    SET IsActive = CASE WHEN FolderID = @KeepFolderID THEN 1 ELSE 0 END
+                                    WHERE ParentFolderID = @ParentFolderID
+                                      AND LOWER(LTRIM(RTRIM(FolderName))) = LOWER(LTRIM(RTRIM(@FolderName)));
+
+                                    SELECT @KeepFolderID AS FolderID;
+                                END
+                                ELSE
                                 BEGIN
                                     INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
                                     OUTPUT INSERTED.FolderID
                                     VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
-                                END
-                                ELSE
-                                BEGIN
-                                    SELECT TOP 1 FolderID FROM tenderFolder
-                                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
                                 END
                             `);
                         if (sub === '01. Tender Issue' && subResult.recordset[0]) {
@@ -552,12 +567,32 @@ const tenderController = {
                             .input('DocID', newTenderId)
                             .input('ConnectionTable', connectionTable)
                             .query(`
-                                IF NOT EXISTS (
-                                    SELECT 1 FROM tenderFolder
-                                    WHERE ParentFolderID = @ParentFolderID AND FolderName = @FolderName
+                                IF EXISTS (
+                                    SELECT 1
+                                    FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID
+                                      AND LOWER(LTRIM(RTRIM(FolderName))) = LOWER(LTRIM(RTRIM(@FolderName)))
                                 )
-                                INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
-                                VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+                                BEGIN
+                                    DECLARE @KeepFolderID INT;
+                                    SELECT TOP 1 @KeepFolderID = FolderID
+                                    FROM tenderFolder
+                                    WHERE ParentFolderID = @ParentFolderID
+                                      AND LOWER(LTRIM(RTRIM(FolderName))) = LOWER(LTRIM(RTRIM(@FolderName)))
+                                    ORDER BY
+                                      CASE WHEN IsActive = 1 THEN 0 ELSE 1 END,
+                                      FolderID ASC;
+
+                                    UPDATE tenderFolder
+                                    SET IsActive = CASE WHEN FolderID = @KeepFolderID THEN 1 ELSE 0 END
+                                    WHERE ParentFolderID = @ParentFolderID
+                                      AND LOWER(LTRIM(RTRIM(FolderName))) = LOWER(LTRIM(RTRIM(@FolderName)));
+                                END
+                                ELSE
+                                BEGIN
+                                    INSERT INTO tenderFolder (FolderName, FolderPath, FolderType, ParentFolderID, AddBy, DocID, ConnectionTable, IsActive)
+                                    VALUES (@FolderName, @FolderPath, @FolderType, @ParentFolderID, @AddBy, @DocID, @ConnectionTable, 1)
+                                END
                             `);
                     }
                 }
